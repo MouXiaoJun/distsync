@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/distsync/distsync/internal/lease"
-	"github.com/distsync/distsync/internal/redis"
+	"github.com/MouXiaoJun/distsync/internal/lease"
+	"github.com/MouXiaoJun/distsync/internal/redis"
 )
 
 // Leader elects a single leader among N replicas for a named role, using an

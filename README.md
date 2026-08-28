@@ -32,7 +32,7 @@ defer guard.Unlock(ctx)
 
 ```go
 import (
-    "github.com/distsync/distsync"
+    "github.com/MouXiaoJun/distsync"
     "github.com/redis/go-redis/v9"
 )
 
@@ -178,7 +178,7 @@ which go-redis handles per node.
 
 `dist.Metrics` is a small interface (`Acquire`, `Release`, `Renew`,
 `RenewalStopped`); a Prometheus implementation ships in
-`github.com/distsync/distsync/metrics`:
+`github.com/MouXiaoJun/distsync/metrics`:
 
 ```go
 client := distsync.New(rdb, distsync.WithMetrics(metrics.New(nil)))

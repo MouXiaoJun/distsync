@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/distsync/distsync/internal/lease"
+	"github.com/MouXiaoJun/distsync/internal/lease"
 )
 
 // handle is the shared lifecycle of any acquired lease: ownership token,

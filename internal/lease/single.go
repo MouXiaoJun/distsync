@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/distsync/distsync/internal/lua"
+	"github.com/MouXiaoJun/distsync/internal/lua"
 	"github.com/redis/go-redis/v9"
 )
 
