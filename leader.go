@@ -164,6 +164,24 @@ func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fence uint6
 		})
 		r.Start()
 		defer r.Stop()
+	} else if l.cfg.watchdog {
+		// NoAutoRenew + Watchdog: detect lease expiry without extending it,
+		// so a non-renewing leader still fails over promptly.
+		r := lease.NewRenewer(renewalInterval(l.cfg.ttl), func(rctx context.Context) error {
+			held, err := le.Held(rctx)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return lease.ErrLost
+			}
+			return nil
+		}, func() {
+			lost.Store(true)
+			leadCancel()
+		})
+		r.Start()
+		defer r.Stop()
 	}
 	defer func() {
 		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

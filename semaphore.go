@@ -127,6 +127,8 @@ func (s *Semaphore) permit(l *lease.PermitSet, n int) *Permit {
 	p := &Permit{handle: newHandle(s.name, "semaphore", s.client.metrics, s.client.tracer, l), n: n}
 	if s.cfg.autoRenew {
 		p.startRenewal(renewalInterval(s.cfg.ttl))
+	} else if s.cfg.watchdog {
+		p.startWatchdog(renewalInterval(s.cfg.ttl))
 	}
 	return p
 }

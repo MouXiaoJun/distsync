@@ -108,6 +108,19 @@ func (l *SingleOwner) Release(ctx context.Context) error {
 	return nil
 }
 
+// Held implements Lease: our owner token is still stored under the key and
+// the key has not expired. Read-only — never extends the lease.
+func (l *SingleOwner) Held(ctx context.Context) (bool, error) {
+	val, err := l.rdb.Get(ctx, l.key).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return val == l.id, nil
+}
+
 // ExpiresAt implements Lease.
 func (l *SingleOwner) ExpiresAt() time.Time {
 	l.mu.Lock()

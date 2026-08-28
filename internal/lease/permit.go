@@ -135,6 +135,33 @@ func (p *PermitSet) Release(ctx context.Context) error {
 	return nil
 }
 
+// Held implements Lease: every owned permit token is still present with a
+// non-expired score. (Sorted-set members are not auto-removed, so expiry is
+// score-vs-now, like the acquire script computes.) Read-only — never
+// extends the permits.
+func (p *PermitSet) Held(ctx context.Context) (bool, error) {
+	p.mu.Lock()
+	tokens := append([]string(nil), p.tokens...)
+	p.mu.Unlock()
+	if len(tokens) == 0 {
+		return false, nil
+	}
+	now := float64(time.Now().UnixMilli())
+	for _, t := range tokens {
+		score, err := p.rdb.ZScore(ctx, p.key, t).Result()
+		if err == redis.Nil {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if score <= now {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // ExpiresAt implements Lease.
 func (p *PermitSet) ExpiresAt() time.Time {
 	p.mu.Lock()

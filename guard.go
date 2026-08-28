@@ -55,6 +55,26 @@ func (h *handle) startRenewal(interval time.Duration) {
 	h.renewer.Start()
 }
 
+// startWatchdog launches a non-extending ownership check (for NoAutoRenew
+// guards): it fires Lost()/Context() when the lease expires server-side,
+// without keeping it alive. Transient Redis errors are retried, not fatal.
+func (h *handle) startWatchdog(interval time.Duration) {
+	h.renewer = lease.NewRenewer(interval, func(ctx context.Context) error {
+		held, err := h.leas.Held(ctx)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return lease.ErrLost
+		}
+		return nil
+	}, func() {
+		h.metrics.RenewalStopped(h.primitive, h.resource, "lost")
+		h.markLost()
+	})
+	h.renewer.Start()
+}
+
 // release performs the idempotent release: at most one caller actually
 // releases; later calls return nil.
 func (h *handle) release(ctx context.Context) (err error) {

@@ -51,6 +51,12 @@ type Lease interface {
 	// Returns ErrLost when ownership is gone.
 	Release(ctx context.Context) error
 
+	// Held reports whether the caller still owns the lease, WITHOUT
+	// extending it. It powers the optional watchdog that lets a
+	// non-renewing holder notice expiry. Errors are transport errors, not
+	// ownership verdicts.
+	Held(ctx context.Context) (bool, error)
+
 	// ExpiresAt returns the current expiry time of the lease (zero when
 	// not held).
 	ExpiresAt() time.Time

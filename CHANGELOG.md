@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-29
+
+### Added
+
+- Watchdog for non-renewing guards: `dist.Watchdog()` runs a lightweight
+  background check (a plain read every ttl/3) that detects lease expiry
+  WITHOUT renewing, and fires `Guard.Lost()`/`Context()` (and cancels a
+  `Leader` callback, so a non-renewing leader still fails over promptly).
+  Pair it with `NoAutoRenew`; with `AutoRenew` the heartbeat already
+  detects loss. Applies to Mutex, RWMutex (readers and writers),
+  Semaphore permits and Leader.
+- The internal `Lease` interface gained `Held(ctx)`: a non-extending
+  ownership check, implemented by all four lease shapes. For sorted-set
+  leases (permits, readers) expiry is judged by score-vs-now, matching the
+  acquire scripts.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

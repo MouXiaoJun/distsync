@@ -101,6 +101,19 @@ func (w *RWWriter) Release(ctx context.Context) error {
 	return nil
 }
 
+// Held implements Lease for the writer role: the writer key still stores
+// our token. Read-only — never extends.
+func (w *RWWriter) Held(ctx context.Context) (bool, error) {
+	val, err := w.rdb.Get(ctx, w.writer).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return val == w.id, nil
+}
+
 // ExpiresAt implements Lease.
 func (w *RWWriter) ExpiresAt() time.Time {
 	w.mu.Lock()
@@ -194,6 +207,19 @@ func (r *RWReader) Release(ctx context.Context) error {
 	r.expiresAt = time.Time{}
 	r.mu.Unlock()
 	return nil
+}
+
+// Held implements Lease for the reader role: our token is still in the
+// readers set with a non-expired score. Read-only — never extends.
+func (r *RWReader) Held(ctx context.Context) (bool, error) {
+	score, err := r.rdb.ZScore(ctx, r.readers, r.id).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return score > float64(time.Now().UnixMilli()), nil
 }
 
 // ExpiresAt implements Lease.
