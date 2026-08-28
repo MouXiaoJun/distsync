@@ -198,6 +198,8 @@ func (rw *RWMutex) guard(l lease.Lease, fence uint64) *Guard {
 	g := &Guard{handle: newHandle(rw.name, "rwmutex", rw.client.metrics, rw.client.tracer, l), fencing: fence}
 	if rw.cfg.autoRenew {
 		g.startRenewal(renewalInterval(rw.cfg.ttl))
+	} else if rw.cfg.watchdog {
+		g.startWatchdog(renewalInterval(rw.cfg.ttl))
 	}
 	return g
 }

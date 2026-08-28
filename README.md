@@ -63,6 +63,9 @@ With fencing tokens, A's write is rejected because its token is older.
 
 Also available: `mu.TryLock(ctx)` (non-blocking, `ErrNotAcquired`),
 `mu.Unlock(ctx)` (convenience), `guard.Renew(ctx)`, `guard.Lost()`.
+A `NoAutoRenew` guard can still be told when its lease expires by adding
+`distsync.Watchdog()` — a read-only check that fires `guard.Lost()` without
+keeping the lease alive.
 
 ### RWMutex
 
@@ -223,9 +226,9 @@ Zero-cost no-op defaults — if you install neither, there is no overhead.
 GitHub Actions runs gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25,
 and golangci-lint on every push and pull request.
 
-## Roadmap (v0.4+)
+## Roadmap (v0.5+)
 
-- RWMutex strict FIFO fairness, watchdog for `NoAutoRenew` guards.
+- RWMutex strict FIFO fairness.
 - Formal spec notes on fencing / lease-expiry semantics.
 
 Deliberately out of scope: distributed map/queue/delayed

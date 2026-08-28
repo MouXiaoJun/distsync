@@ -12,6 +12,7 @@ type config struct {
 	autoRenew bool
 	retry     retryPolicy
 	fencing   bool
+	watchdog  bool
 }
 
 // retryPolicy describes exponential backoff with jitter for acquisition.
@@ -55,9 +56,18 @@ func AutoRenew() Option {
 
 // NoAutoRenew disables background renewal. The lease then lives for at most
 // ttl and expires on its own — use it for deliberately short critical
-// sections where a missed renewal must yield ownership quickly.
+// sections where a missed renewal must yield ownership quickly. Pair with
+// Watchdog if you still want to be told when the lease expires.
 func NoAutoRenew() Option {
 	return func(c *config) { c.autoRenew = false }
+}
+
+// Watchdog runs a lightweight background check that detects lease expiry
+// WITHOUT renewing, and fires the guard's Lost()/Context() when ownership is
+// gone. It only matters together with NoAutoRenew (with AutoRenew the
+// heartbeat already detects loss). Checking is a plain read every ttl/3.
+func Watchdog() Option {
+	return func(c *config) { c.watchdog = true }
 }
 
 // Fencing enables fencing tokens. They are enabled by default for the
