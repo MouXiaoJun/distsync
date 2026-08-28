@@ -42,6 +42,15 @@ var semReleaseSrc string
 //go:embed ratelimit.lua
 var rateLimitSrc string
 
+//go:embed ratelimit_fixed.lua
+var rateLimitFixedSrc string
+
+//go:embed ratelimit_sliding.lua
+var rateLimitSlidingSrc string
+
+//go:embed ratelimit_leaky.lua
+var rateLimitLeakySrc string
+
 var (
 	// SingleAcquire takes an exclusive lease and optionally mints a
 	// fencing token (mutex, RWMutex writer, leader election).
@@ -70,4 +79,13 @@ var (
 
 	// RateLimit evaluates one token-bucket decision.
 	RateLimit = redis.NewScript(rateLimitSrc)
+
+	// RateLimitFixed evaluates one fixed-window decision.
+	RateLimitFixed = redis.NewScript(rateLimitFixedSrc)
+
+	// RateLimitSliding evaluates one sliding-window-log decision.
+	RateLimitSliding = redis.NewScript(rateLimitSlidingSrc)
+
+	// RateLimitLeaky evaluates one leaky-bucket decision.
+	RateLimitLeaky = redis.NewScript(rateLimitLeakySrc)
 )

@@ -101,3 +101,91 @@ func TestRateLimiterReset(t *testing.T) {
 		t.Fatal("should be allowed after reset")
 	}
 }
+
+func TestRateLimiterDefaultAlgorithmIsTokenBucket(t *testing.T) {
+	c, _ := newTestClient(t)
+	if got := c.RateLimiter("a", PerSecond(1)).Algorithm(); got != AlgorithmTokenBucket {
+		t.Fatalf("default algorithm = %v, want token-bucket", got)
+	}
+	for alg, opt := range map[Algorithm]RateLimiterOption{
+		AlgorithmFixedWindow:   FixedWindow(),
+		AlgorithmSlidingWindow: SlidingWindow(),
+		AlgorithmLeakyBucket:   LeakyBucket(),
+		AlgorithmTokenBucket:   TokenBucket(),
+	} {
+		if got := c.RateLimiter("a", PerSecond(1), opt).Algorithm(); got != alg {
+			t.Fatalf("algorithm = %v, want %v", got, alg)
+		}
+	}
+}
+
+// Fixed window: PerSecond(10) -> window of 1s, limit 10. The full burst
+// passes, then a whole-burst request is rejected with a positive retry.
+func TestRateLimiterFixedWindow(t *testing.T) {
+	c, _ := newTestClient(t)
+	rl := c.RateLimiter("fixed:1", PerSecond(10), FixedWindow())
+
+	for i := 0; i < 10; i++ {
+		if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+			t.Fatalf("request %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+	ok, retry, err := rl.Allow(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("allow: %v", err)
+	}
+	if ok {
+		t.Fatal("fixed window should reject beyond its limit")
+	}
+	if retry <= 0 {
+		t.Fatalf("retry-after should be positive, got %v", retry)
+	}
+}
+
+// Sliding window with a tiny window (PerSecond(10).WithBurst(1) -> 100ms):
+// one request in, the next is rejected, and after the entry ages out the
+// request passes again — exactly the rolling-window behavior.
+func TestRateLimiterSlidingWindow(t *testing.T) {
+	c, _ := newTestClient(t)
+	rl := c.RateLimiter("sliding:1", PerSecond(10).WithBurst(1), SlidingWindow())
+
+	if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+		t.Fatalf("first request: ok=%v err=%v", ok, err)
+	}
+	if ok, _, _ := rl.Allow(context.Background(), 1); ok {
+		t.Fatal("sliding window of 1 should reject the second request")
+	}
+
+	time.Sleep(200 * time.Millisecond) // > window (100ms)
+	if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+		t.Fatalf("request after window roll: ok=%v err=%v", ok, err)
+	}
+}
+
+// Leaky bucket with burst 10: 10 requests fill the bucket, the 11th is
+// rejected, and after draining it passes again.
+func TestRateLimiterLeakyBucket(t *testing.T) {
+	c, _ := newTestClient(t)
+	rl := c.RateLimiter("leaky:1", PerSecond(10).WithBurst(10), LeakyBucket())
+
+	for i := 0; i < 10; i++ {
+		if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+			t.Fatalf("request %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+	ok, retry, err := rl.Allow(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("allow: %v", err)
+	}
+	if ok {
+		t.Fatal("leaky bucket should reject once full")
+	}
+	if retry <= 0 {
+		t.Fatalf("retry-after should be positive, got %v", retry)
+	}
+
+	time.Sleep(200 * time.Millisecond) // drains 2 tokens at 10/s
+	if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+		t.Fatalf("request after drain: ok=%v err=%v", ok, err)
+	}
+}

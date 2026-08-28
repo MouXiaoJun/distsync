@@ -1,0 +1,11 @@
+# golangci-lint v2 configuration.
+version: "2"
+
+linters:
+  # The standard set: errcheck, govet, ineffassign, staticcheck, unused,
+  # plus a few more. See https://golangci-lint.run/.
+  default: standard
+
+formatters:
+  enable:
+    - gofmt

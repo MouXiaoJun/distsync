@@ -25,7 +25,7 @@ defer guard.Unlock(ctx)
 | `Mutex` | exclusive lock | serialize writes to one resource across all replicas |
 | `RWMutex` | read-write lock | config updates, cache rebuilds, shared-resource modification |
 | `Semaphore` | counting permit | "at most 20 AI calls", "at most 5 transcodes", "100 crawlers per tenant" |
-| `RateLimiter` | token bucket | aggregate cluster-wide rate limits (`PerSecond`, `PerMinute`) |
+| `RateLimiter` | 4 algorithms | aggregate cluster-wide rate limits (`PerSecond`, `PerMinute`) |
 | `Leader` | leader election | cron, reconciliation, settlement, data sync — one replica only |
 
 ## Quick start
@@ -96,10 +96,10 @@ defer permit.Release(ctx)
 Permits expire and are reclaimed atomically, so a crashed holder never
 leaks capacity forever. `sem.TryAcquire(ctx, n)`, `sem.Available(ctx)`.
 
-### RateLimiter (token bucket, v0.1)
+### RateLimiter (four algorithms)
 
 ```go
-limiter := client.RateLimiter("tenant:1001", distsync.PerSecond(100))
+limiter := client.RateLimiter("tenant:1001", distsync.PerSecond(100)) // token bucket (default)
 
 if err := limiter.Acquire(ctx, 1); err != nil { // blocks until allowed
     return err
@@ -108,8 +108,18 @@ if err := limiter.Acquire(ctx, 1); err != nil { // blocks until allowed
 ok, retryAfter, err := limiter.Allow(ctx, 1)
 ```
 
-One algorithm in v0.1 (token bucket); fixed-window, sliding-window and
-leaky-bucket are planned.
+Pick an algorithm per limiter — each is a single atomic Lua script:
+
+| Algorithm | Option | Behavior |
+|---|---|---|
+| Token bucket | `distsync.TokenBucket()` (default) | budget refills at `Rate`; bursts up to `Capacity` |
+| Fixed window | `distsync.FixedWindow()` | at most `Capacity` requests per window of `Capacity/Rate` |
+| Sliding window | `distsync.SlidingWindow()` | exact rolling window (one entry per request — moderate rates) |
+| Leaky bucket | `distsync.LeakyBucket()` | output smoothed at `Rate`; bursts absorbed, then throttled |
+
+```go
+strict := client.RateLimiter("api:public", distsync.PerSecond(100), distsync.SlidingWindow())
+```
 
 ### Leader election
 
@@ -184,8 +194,14 @@ which go-redis handles per node.
 client := distsync.New(rdb, distsync.WithMetrics(metrics.New(nil)))
 ```
 
-`dist.Tracer` accepts an OpenTelemetry adapter. Zero-cost no-op defaults —
-if you install neither, there is no overhead.
+`dist.Tracer` accepts an OpenTelemetry adapter; a ready-made one ships in
+`github.com/MouXiaoJun/distsync/telemetry`:
+
+```go
+client := distsync.New(rdb, distsync.WithTracer(telemetry.NewTracer(nil))) // nil = global OTel provider
+```
+
+Zero-cost no-op defaults — if you install neither, there is no overhead.
 
 ## Compatibility
 
@@ -193,15 +209,18 @@ if you install neither, there is no overhead.
 - Any go-redis v9 `Cmdable`: `*redis.Client`, `*redis.ClusterClient`, rings.
 - Go >= 1.21.
 
-## Roadmap (v0.2+)
+## CI
 
-- RWMutex fairness tuning, `Leader` fencing option, watchdog for
+GitHub Actions runs gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25,
+and golangci-lint on every push and pull request.
+
+## Roadmap (v0.3+)
+
+- RWMutex strict FIFO fairness, `Leader` fencing option, watchdog for
   `NoAutoRenew` guards.
-- RateLimiter: fixed window, sliding window, leaky bucket.
-- OpenTelemetry adapter package.
-- Benchmark suite and formal spec notes (fencing / lease-expiry semantics).
+- Formal spec notes on fencing / lease-expiry semantics.
 
-Deliberately out of scope (v0.x): distributed map/queue/delayed
+Deliberately out of scope: distributed map/queue/delayed
 queue/topic/bloom filter/atomic counter/sets/lists/remote services. This
 library stays a synchronization toolkit.
 

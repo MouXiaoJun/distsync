@@ -16,7 +16,7 @@ func Example() {
 	}
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	client := distsync.New(rdb)
 
@@ -53,7 +53,7 @@ func ExampleSemaphore() {
 	}
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	client := distsync.New(rdb)
 	sem := client.Semaphore("openai:gpt5", 20)
