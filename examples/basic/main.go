@@ -18,8 +18,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/distsync/distsync"
-	"github.com/distsync/distsync/metrics"
+	"github.com/MouXiaoJun/distsync"
+	"github.com/MouXiaoJun/distsync/metrics"
 	"github.com/redis/go-redis/v9"
 )
 

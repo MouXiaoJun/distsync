@@ -1,4 +1,4 @@
-module github.com/distsync/distsync
+module github.com/MouXiaoJun/distsync
 
 go 1.21
 

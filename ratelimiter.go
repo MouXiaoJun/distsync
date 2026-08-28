@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/distsync/distsync/internal/lua"
-	"github.com/distsync/distsync/internal/redis"
+	"github.com/MouXiaoJun/distsync/internal/lua"
+	"github.com/MouXiaoJun/distsync/internal/redis"
 )
 
 // RateLimiter is a distributed token-bucket rate limiter (v0.1 implements

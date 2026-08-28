@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/distsync/distsync/internal/lease"
-	"github.com/distsync/distsync/internal/redis"
+	"github.com/MouXiaoJun/distsync/internal/lease"
+	"github.com/MouXiaoJun/distsync/internal/redis"
 )
 
 // Semaphore is a distributed counting semaphore. At most capacity permits

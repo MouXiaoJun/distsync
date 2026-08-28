@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/distsync/distsync/internal/lease"
-	"github.com/distsync/distsync/internal/redis"
+	"github.com/MouXiaoJun/distsync/internal/lease"
+	"github.com/MouXiaoJun/distsync/internal/redis"
 )
 
 // RWMutex is a distributed read-write lock. Any number of readers may hold

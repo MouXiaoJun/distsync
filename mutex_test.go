@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/distsync/distsync/internal/redis"
+	"github.com/MouXiaoJun/distsync/internal/redis"
 )
 
 func TestMutexLockUnlock(t *testing.T) {

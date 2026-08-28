@@ -3,7 +3,7 @@ package distsync
 import (
 	"errors"
 
-	"github.com/distsync/distsync/internal/lease"
+	"github.com/MouXiaoJun/distsync/internal/lease"
 )
 
 // Sentinel errors returned by the public API. Use errors.Is to match them.

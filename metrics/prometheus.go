@@ -14,7 +14,7 @@ package metrics
 import (
 	"time"
 
-	"github.com/distsync/distsync"
+	"github.com/MouXiaoJun/distsync"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
