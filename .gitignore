@@ -1,0 +1,7 @@
+# Go build caches used by this workspace's sandboxed builds
+.cache/
+
+# Binaries
+/distsync
+*.exe
+.DS_Store

@@ -1,0 +1,210 @@
+# distsync
+
+**Distributed synchronization primitives for Go, backed by Redis and Valkey.**
+
+Not "another Redis client" — a `sync`-style toolkit. Where you would reach
+for `sync.Mutex`, `sync.RWMutex`, or a counting channel inside one process,
+distsync gives you the same shape across processes, with leases, fencing
+tokens, and automatic renewal built in.
+
+```go
+client := distsync.New(rdb) // *redis.Client or *redis.ClusterClient
+
+mu := client.Mutex("order:10001")
+guard, err := mu.Lock(ctx)
+if err != nil {
+    return err
+}
+defer guard.Unlock(ctx)
+```
+
+## Primitives
+
+| Primitive | Type | Use it for |
+|---|---|---|
+| `Mutex` | exclusive lock | serialize writes to one resource across all replicas |
+| `RWMutex` | read-write lock | config updates, cache rebuilds, shared-resource modification |
+| `Semaphore` | counting permit | "at most 20 AI calls", "at most 5 transcodes", "100 crawlers per tenant" |
+| `RateLimiter` | token bucket | aggregate cluster-wide rate limits (`PerSecond`, `PerMinute`) |
+| `Leader` | leader election | cron, reconciliation, settlement, data sync — one replica only |
+
+## Quick start
+
+```go
+import (
+    "github.com/distsync/distsync"
+    "github.com/redis/go-redis/v9"
+)
+
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+client := distsync.New(rdb)
+```
+
+### Mutex — with fencing token
+
+```go
+mu := client.Mutex("payment:10001", distsync.Lease(10*time.Second))
+
+guard, err := mu.Lock(ctx)
+if err != nil {
+    return err
+}
+defer guard.Unlock(ctx)
+
+// The fencing token is strictly increasing per resource. Persist it with
+// the side effect and reject stale writers:
+//   UPDATE orders SET status='paid', fencing_token=? WHERE id=10001 AND fencing_token < ?
+fmt.Println(guard.FencingToken())
+```
+
+This solves the classic lock-expiry race: A holds the lock → A pauses (GC /
+network) → the lease expires → B acquires → A resumes → A and B both write.
+With fencing tokens, A's write is rejected because its token is older.
+
+Also available: `mu.TryLock(ctx)` (non-blocking, `ErrNotAcquired`),
+`mu.Unlock(ctx)` (convenience), `guard.Renew(ctx)`, `guard.Lost()`.
+
+### RWMutex
+
+```go
+mu := client.RWMutex("config:tenant:1001")
+
+rg, err := mu.RLock(ctx) // many readers may coexist
+config := load()
+rg.Unlock(ctx)
+
+wg, err := mu.Lock(ctx) // exclusive writer, fencing token included
+update()
+wg.Unlock(ctx)
+```
+
+Writers queued behind active readers get priority over new readers
+(writer preference), so a writer can never be starved by a reader stream.
+
+### Semaphore
+
+```go
+sem := client.Semaphore("openai:gpt5", 20) // max 20 concurrent AI requests
+
+permit, err := sem.Acquire(ctx, 1)
+if err != nil {
+    return err
+}
+defer permit.Release(ctx)
+```
+
+Permits expire and are reclaimed atomically, so a crashed holder never
+leaks capacity forever. `sem.TryAcquire(ctx, n)`, `sem.Available(ctx)`.
+
+### RateLimiter (token bucket, v0.1)
+
+```go
+limiter := client.RateLimiter("tenant:1001", distsync.PerSecond(100))
+
+if err := limiter.Acquire(ctx, 1); err != nil { // blocks until allowed
+    return err
+}
+// non-blocking variant:
+ok, retryAfter, err := limiter.Allow(ctx, 1)
+```
+
+One algorithm in v0.1 (token bucket); fixed-window, sliding-window and
+leaky-bucket are planned.
+
+### Leader election
+
+```go
+leader := client.Leader("scheduler")
+
+if err := leader.Run(ctx, func(ctx context.Context) error {
+    return scheduler.Start(ctx) // cron, reconciliation, settlement, sync
+}); err != nil {
+    return err
+}
+```
+
+Only one replica runs the callback. If the leader dies or its lease
+expires, another replica takes over; the callback's context is canceled on
+loss so the old leader can shut down gracefully. `TryRun` gives a
+non-blocking variant (`ErrNotAcquired` when someone else is leader).
+
+### Distributed single-flight
+
+```go
+cfg, err := distsync.Once(ctx, mu, func(ctx context.Context) (Config, error) {
+    return loadConfig(ctx) // serialized across the cluster
+})
+```
+
+## Design
+
+### One unified Lease
+
+Every primitive is built on one `Lease` abstraction
+(`internal/lease`), which handles ownership tokens, TTL, expiry, renewal,
+Redis failures and context cancellation exactly once — not once per
+primitive:
+
+```
+Mutex ──┐
+RWMutex ┼──► Lease (SingleOwner / PermitSet) ──► Lua scripts ──► Redis / Valkey
+Leader ─┘
+Semaphore ──► PermitSet
+```
+
+- **Lease** — `ID()`, `Acquire(ctx)`, `Renew(ctx)`, `Release(ctx)`,
+  `ExpiresAt()`.
+- **Owner tokens** — every acquisition mints a fresh random token; release
+  and renew are compare-and-set on the token, so a stale holder can never
+  unlock a newer owner.
+- **Automatic renewal** — one heartbeat goroutine per held lease (interval
+  `ttl/3`), started on acquire, stopped synchronously on release. No
+  goroutine leaks: `Release`/`Unlock`/`Run` block until the heartbeat has
+  fully exited.
+- **Safe on failure** — definitive ownership loss (renewal says "not
+  yours") cancels the guard's `Context()`/`Lost()` and stops the heartbeat;
+  transient Redis errors are retried rather than silently dropping the
+  lease.
+
+### Redis Cluster
+
+Every key a primitive touches is derived from one hash-tagged name
+(`"order:10001"` → `"{order:10001}"`, `"{order:10001}:fencing"`, ...), so
+all multi-key Lua scripts stay on a single cluster slot and never hit
+CROSSSLOT errors. Scripts run via EVALSHA with automatic EVAL fallback,
+which go-redis handles per node.
+
+### Observability
+
+`dist.Metrics` is a small interface (`Acquire`, `Release`, `Renew`,
+`RenewalStopped`); a Prometheus implementation ships in
+`github.com/distsync/distsync/metrics`:
+
+```go
+client := distsync.New(rdb, distsync.WithMetrics(metrics.New(nil)))
+```
+
+`dist.Tracer` accepts an OpenTelemetry adapter. Zero-cost no-op defaults —
+if you install neither, there is no overhead.
+
+## Compatibility
+
+- Redis >= 6.0 and Valkey (pure Lua, no Redis modules).
+- Any go-redis v9 `Cmdable`: `*redis.Client`, `*redis.ClusterClient`, rings.
+- Go >= 1.21.
+
+## Roadmap (v0.2+)
+
+- RWMutex fairness tuning, `Leader` fencing option, watchdog for
+  `NoAutoRenew` guards.
+- RateLimiter: fixed window, sliding window, leaky bucket.
+- OpenTelemetry adapter package.
+- Benchmark suite and formal spec notes (fencing / lease-expiry semantics).
+
+Deliberately out of scope (v0.x): distributed map/queue/delayed
+queue/topic/bloom filter/atomic counter/sets/lists/remote services. This
+library stays a synchronization toolkit.
+
+## License
+
+MIT
