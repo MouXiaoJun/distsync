@@ -14,7 +14,7 @@ func TestRWMutexWriteExcludesWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer 1: %v", err)
 	}
-	defer g1.Unlock(context.Background())
+	defer func() { _ = g1.Unlock(context.Background()) }()
 
 	_, err = mu.TryLock(context.Background())
 	expectBusy(t, err)
@@ -28,7 +28,7 @@ func TestRWMutexWriteExcludesRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer: %v", err)
 	}
-	defer w.Unlock(context.Background())
+	defer func() { _ = w.Unlock(context.Background()) }()
 
 	_, err = mu.TryRLock(context.Background())
 	expectBusy(t, err)
@@ -42,13 +42,13 @@ func TestRWMutexReadsCoexist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reader 1: %v", err)
 	}
-	defer r1.Unlock(context.Background())
+	defer func() { _ = r1.Unlock(context.Background()) }()
 
 	r2, err := mu.RLock(context.Background())
 	if err != nil {
 		t.Fatalf("reader 2 should coexist: %v", err)
 	}
-	defer r2.Unlock(context.Background())
+	defer func() { _ = r2.Unlock(context.Background()) }()
 
 	if r1.FencingToken() != 0 || r2.FencingToken() != 0 {
 		t.Fatal("read guards must not carry fencing tokens")
@@ -63,7 +63,7 @@ func TestRWMutexReadExcludesWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reader: %v", err)
 	}
-	defer r.Unlock(context.Background())
+	defer func() { _ = r.Unlock(context.Background()) }()
 
 	_, err = mu.TryLock(context.Background())
 	expectBusy(t, err)
@@ -173,7 +173,7 @@ func TestRWMutexStaleWriterCannotReleaseNewWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer B: %v", err)
 	}
-	defer wB.Unlock(context.Background())
+	defer func() { _ = wB.Unlock(context.Background()) }()
 
 	// A's stale unlock must not touch B's writer lease.
 	_ = wA.Unlock(context.Background())

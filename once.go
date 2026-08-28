@@ -19,6 +19,6 @@ func Once[T any](ctx context.Context, mu *Mutex, fn func(context.Context) (T, er
 		var zero T
 		return zero, err
 	}
-	defer guard.Unlock(context.WithoutCancel(ctx))
+	defer func() { _ = guard.Unlock(context.WithoutCancel(ctx)) }()
 	return fn(ctx)
 }

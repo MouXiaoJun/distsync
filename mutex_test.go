@@ -63,7 +63,7 @@ func TestMutexTryLockBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	defer g1.Unlock(context.Background())
+	defer func() { _ = g1.Unlock(context.Background()) }()
 
 	_, err = mu.TryLock(context.Background())
 	expectBusy(t, err)
@@ -77,7 +77,7 @@ func TestMutexLockContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	defer g1.Unlock(context.Background())
+	defer func() { _ = g1.Unlock(context.Background()) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -162,7 +162,7 @@ func TestMutexAutoRenewKeepsLeaseAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	defer g.Unlock(context.Background())
+	defer func() { _ = g.Unlock(context.Background()) }()
 
 	for i := 0; i < 3; i++ {
 		fastForward(s, 250*time.Millisecond) // jump past the previous TTL
@@ -187,7 +187,7 @@ func TestMutexNoRenewExpires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	defer g.Unlock(context.Background())
+	defer func() { _ = g.Unlock(context.Background()) }()
 
 	fastForward(s, 200*time.Millisecond)
 

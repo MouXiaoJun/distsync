@@ -15,13 +15,13 @@ func TestSemaphoreCapacityEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("permit 1: %v", err)
 	}
-	defer p1.Release(context.Background())
+	defer func() { _ = p1.Release(context.Background()) }()
 
 	p2, err := sem.Acquire(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("permit 2: %v", err)
 	}
-	defer p2.Release(context.Background())
+	defer func() { _ = p2.Release(context.Background()) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -114,7 +114,7 @@ func TestSemaphoreTryAcquire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("try acquire: %v", err)
 	}
-	defer p.Release(context.Background())
+	defer func() { _ = p.Release(context.Background()) }()
 
 	_, err = sem.TryAcquire(context.Background(), 1)
 	expectBusy(t, err)
@@ -128,7 +128,7 @@ func TestSemaphoreRenewKeepsPermitAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	defer p.Release(context.Background())
+	defer func() { _ = p.Release(context.Background()) }()
 
 	// Hold well past the TTL; the heartbeat should keep the permit.
 	time.Sleep(600 * time.Millisecond)
