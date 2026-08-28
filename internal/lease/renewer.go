@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Renewer drives periodic Renew calls in a single background goroutine. It
 // is the one place automatic renewal lives, so every primitive shares the
 // same heartbeat behavior — and the same no-goroutine-leak guarantee:
-// Stop() is idempotent, blocks until the loop has fully exited, and closing
-// the loop's own stop channel can never deadlock with the loop itself.
+// Stop() is idempotent, safe to call in any state (even before Start), and
+// blocks until the loop has fully exited. Closing the loop's own stop
+// channel can never deadlock with the loop itself.
 type Renewer struct {
 	interval time.Duration
 	renew    func(ctx context.Context) error
@@ -20,6 +22,9 @@ type Renewer struct {
 	stop chan struct{}
 	done chan struct{}
 	once sync.Once
+
+	startOnce sync.Once
+	started   atomic.Bool
 }
 
 // NewRenewer builds a renewer. onLost (may be nil) is invoked exactly when
@@ -35,20 +40,32 @@ func NewRenewer(interval time.Duration, renew func(context.Context) error, onLos
 	}
 }
 
-// Start launches the renewal loop. Call it at most once.
+// Start launches the renewal loop. Call it at most once; later calls are
+// no-ops.
 func (r *Renewer) Start() {
-	go r.loop()
+	r.startOnce.Do(func() {
+		r.started.Store(true)
+		go r.loop()
+	})
 }
 
-// Done is closed once the loop has fully exited. Useful for tests that
-// assert on goroutine cleanup.
+// Done is closed once the loop has fully exited (or was never started).
+// Useful for tests that assert on goroutine cleanup.
 func (r *Renewer) Done() <-chan struct{} { return r.done }
 
-// Stop terminates the loop and blocks until it has exited. Idempotent.
+// Stop terminates the loop and blocks until it has exited. Idempotent and
+// safe to call before Start (the loop simply never runs).
 func (r *Renewer) Stop() {
 	r.once.Do(func() {
 		close(r.stop)
-		<-r.done
+		if r.started.Load() {
+			<-r.done
+		} else {
+			// The loop never ran, so it has trivially "exited": close done
+			// ourselves. Without this, a Stop-before-Start would block
+			// forever waiting on a goroutine that never starts.
+			close(r.done)
+		}
 	})
 }
 

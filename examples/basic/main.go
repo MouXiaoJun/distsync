@@ -20,6 +20,7 @@ import (
 
 	"github.com/MouXiaoJun/distsync"
 	"github.com/MouXiaoJun/distsync/metrics"
+	"github.com/MouXiaoJun/distsync/telemetry"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -34,7 +35,10 @@ func main() {
 		log.Fatalf("cannot reach redis at %s (%v) — start one with: docker run -p 6379:6379 redis:7", addr, err)
 	}
 
-	client := distsync.New(rdb, distsync.WithMetrics(metrics.New(nil)))
+	client := distsync.New(rdb,
+		distsync.WithMetrics(metrics.New(nil)),
+		distsync.WithTracer(telemetry.NewTracer(nil)), // nil = global OTel provider
+	)
 
 	// --- Mutex with fencing token ---
 	mu := client.Mutex("order:10001", distsync.Lease(10*time.Second), distsync.Fencing())
@@ -82,6 +86,14 @@ func main() {
 		log.Fatalf("rate limit: %v", err)
 	}
 	fmt.Println("rate limiter allowed 1 request")
+
+	// A stricter variant: exact rolling window instead of token bucket.
+	rlStrict := client.RateLimiter("tenant:1001:strict", distsync.PerSecond(100), distsync.SlidingWindow())
+	ok, retry, err := rlStrict.Allow(ctx, 1)
+	if err != nil {
+		log.Fatalf("sliding allow: %v", err)
+	}
+	fmt.Printf("sliding-window allow: ok=%v retryAfter=%v\n", ok, retry)
 
 	// --- Leader election ---
 	leader := client.Leader("scheduler")
