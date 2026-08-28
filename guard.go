@@ -3,6 +3,7 @@ package distsync
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,4 +145,16 @@ func ctxNonNil(ctx context.Context) {
 	if ctx == nil {
 		panic("distsync: nil context")
 	}
+}
+
+// renewalInterval returns ttl/3 with ±20% jitter. A fleet of holders that
+// acquired at the same moment would otherwise renew on aligned ticks and
+// thundering-herd Redis; the jitter spreads the heartbeats.
+func renewalInterval(ttl time.Duration) time.Duration {
+	base := ttl / 3
+	if base <= 0 {
+		base = time.Second
+	}
+	jitter := 0.8 + 0.4*rand.Float64()
+	return time.Duration(float64(base) * jitter)
 }

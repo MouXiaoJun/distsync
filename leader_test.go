@@ -230,3 +230,107 @@ func TestOnceSerializesCallers(t *testing.T) {
 		t.Fatalf("max concurrent fn executions = %d, want 1 (serialized)", maxConcurrent.Load())
 	}
 }
+
+// TestLeaderFencingDisabledByDefault: without the Fencing option the leader
+// mints no fencing token.
+func TestLeaderFencingDisabledByDefault(t *testing.T) {
+	c, _ := newTestClient(t)
+	leader := c.Leader("fence:off")
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- leader.Run(ctx, func(lctx context.Context) error {
+			<-lctx.Done()
+			return nil
+		})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !leader.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !leader.IsLeader() {
+		t.Fatal("never became leader")
+	}
+	if token := leader.FencingToken(); token != 0 {
+		t.Fatalf("FencingToken = %d, want 0 (fencing disabled)", token)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned")
+	}
+}
+
+// TestLeaderFencingTokensIncreaseAcrossLeaderships: with Fencing() enabled,
+// each leadership mints a strictly increasing token, so a stale leader can
+// never clobber a newer leader's writes (the same guarantee mutexes give).
+func TestLeaderFencingTokensIncreaseAcrossLeaderships(t *testing.T) {
+	c, _ := newTestClient(t)
+	leader1 := c.Leader("fence:on", Fencing())
+	leader2 := c.Leader("fence:on", Fencing())
+
+	var firstToken, secondToken atomic.Uint64
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- leader1.Run(ctx1, func(lctx context.Context) error {
+			// Wait until the token is visible, then capture it.
+			for leader1.FencingToken() == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
+			firstToken.Store(leader1.FencingToken())
+			<-lctx.Done()
+			return nil
+		})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for firstToken.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if firstToken.Load() == 0 {
+		t.Fatal("leader1 never minted a fencing token")
+	}
+	cancel1()
+	select {
+	case <-firstDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("leader1 Run never returned")
+	}
+
+	// leader2 takes over and must mint a strictly larger token.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- leader2.Run(ctx2, func(lctx context.Context) error {
+			for leader2.FencingToken() == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
+			secondToken.Store(leader2.FencingToken())
+			<-lctx.Done()
+			return nil
+		})
+	}()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for secondToken.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if secondToken.Load() == 0 {
+		t.Fatal("leader2 never minted a fencing token")
+	}
+	if secondToken.Load() <= firstToken.Load() {
+		t.Fatalf("fencing tokens must increase across leaderships: %d then %d", firstToken.Load(), secondToken.Load())
+	}
+	cancel2()
+	select {
+	case <-secondDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("leader2 Run never returned")
+	}
+}

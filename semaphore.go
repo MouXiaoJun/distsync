@@ -126,7 +126,7 @@ func (s *Semaphore) Available(ctx context.Context) (int, error) {
 func (s *Semaphore) permit(l *lease.PermitSet, n int) *Permit {
 	p := &Permit{handle: newHandle(s.name, "semaphore", s.client.metrics, s.client.tracer, l), n: n}
 	if s.cfg.autoRenew {
-		p.startRenewal(s.cfg.ttl / 3)
+		p.startRenewal(renewalInterval(s.cfg.ttl))
 	}
 	return p
 }

@@ -131,7 +131,7 @@ func (m *Mutex) Unlock(ctx context.Context) error {
 func (m *Mutex) guard(l *lease.SingleOwner, fence uint64) *Guard {
 	g := &Guard{handle: newHandle(m.name, "mutex", m.client.metrics, m.client.tracer, l), fencing: fence}
 	if m.cfg.autoRenew {
-		g.startRenewal(m.cfg.ttl / 3)
+		g.startRenewal(renewalInterval(m.cfg.ttl))
 	}
 	return g
 }

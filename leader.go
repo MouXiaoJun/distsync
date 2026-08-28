@@ -27,14 +27,16 @@ import (
 // (failover) or the parent context is canceled, so the leader can shut its
 // work down gracefully.
 type Leader struct {
-	client *Client
-	name   string
-	cfg    config
-	key    string
-	fkey   string
+	client  *Client
+	name    string
+	cfg     config
+	key     string
+	fkey    string
+	fencing bool
 
 	stateMu sync.Mutex
 	active  bool
+	fence   uint64
 }
 
 // Leader creates a leader-election handle for the named role.
@@ -42,11 +44,12 @@ func (c *Client) Leader(name string, opts ...Option) *Leader {
 	cfg := c.resolved(opts...)
 	key := redisx.Key(name)
 	return &Leader{
-		client: c,
-		name:   name,
-		cfg:    cfg,
-		key:    key,
-		fkey:   redisx.Derived(key, "fencing"),
+		client:  c,
+		name:    name,
+		cfg:     cfg,
+		key:     key,
+		fkey:    redisx.Derived(key, "fencing"),
+		fencing: cfg.fencing,
 	}
 }
 
@@ -64,12 +67,14 @@ func (l *Leader) Run(ctx context.Context, fn func(context.Context) error) (err e
 	if fn == nil {
 		return fmt.Errorf("distsync: leader %q: nil callback", l.name)
 	}
-	le := lease.NewSingleOwner(l.client.rdb, l.key, l.fkey, l.cfg.ttl, false)
+	le := lease.NewSingleOwner(l.client.rdb, l.key, l.fkey, l.cfg.ttl, l.fencing)
 
 	start := time.Now()
+	var fence uint64
 	for attempt := 0; ; attempt++ {
-		err := le.Acquire(ctx)
+		f, err := le.TryAcquire(ctx)
 		if err == nil {
+			fence = f
 			break
 		}
 		if !errors.Is(err, lease.ErrBusy) {
@@ -85,7 +90,7 @@ func (l *Leader) Run(ctx context.Context, fn func(context.Context) error) (err e
 		}
 	}
 	l.client.metrics.Acquire("leader", l.name, true, time.Since(start))
-	return l.runHeld(ctx, le, fn)
+	return l.runHeld(ctx, le, fence, fn)
 }
 
 // TryRun attempts to become leader without blocking. It returns
@@ -98,15 +103,16 @@ func (l *Leader) TryRun(ctx context.Context, fn func(context.Context) error) (er
 	if fn == nil {
 		return fmt.Errorf("distsync: leader %q: nil callback", l.name)
 	}
-	le := lease.NewSingleOwner(l.client.rdb, l.key, l.fkey, l.cfg.ttl, false)
-	if err := le.Acquire(ctx); err != nil {
+	le := lease.NewSingleOwner(l.client.rdb, l.key, l.fkey, l.cfg.ttl, l.fencing)
+	fence, err := le.TryAcquire(ctx)
+	if err != nil {
 		if errors.Is(err, lease.ErrBusy) {
 			return ErrNotAcquired
 		}
 		return err
 	}
 	l.client.metrics.Acquire("leader", l.name, true, 0)
-	return l.runHeld(ctx, le, fn)
+	return l.runHeld(ctx, le, fence, fn)
 }
 
 // IsLeader reports whether this handle currently holds the leader lease
@@ -117,14 +123,29 @@ func (l *Leader) IsLeader() bool {
 	return l.active
 }
 
+// FencingToken returns the fencing token minted for the current leadership
+// (0 when fencing is disabled, or when this handle is not the leader).
+// Tokens are strictly increasing per role across all replicas and across
+// leadership changes, so the leader can fence its side effects exactly like
+// a mutex holder:
+//
+//	UPDATE settlements SET ledger_id=?, fencing_token=? WHERE id=? AND fencing_token < ?
+func (l *Leader) FencingToken() uint64 {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	return l.fence
+}
+
 // runHeld executes fn while this handle provably holds the leader lease.
-func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fn func(context.Context) error) error {
+func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fence uint64, fn func(context.Context) error) error {
 	l.stateMu.Lock()
 	l.active = true
+	l.fence = fence
 	l.stateMu.Unlock()
 	defer func() {
 		l.stateMu.Lock()
 		l.active = false
+		l.fence = 0
 		l.stateMu.Unlock()
 	}()
 
@@ -135,7 +156,7 @@ func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fn func(con
 
 	var lost atomic.Bool
 	if l.cfg.autoRenew {
-		r := lease.NewRenewer(l.cfg.ttl/3, func(rctx context.Context) error {
+		r := lease.NewRenewer(renewalInterval(l.cfg.ttl), func(rctx context.Context) error {
 			return le.Renew(rctx)
 		}, func() {
 			lost.Store(true)
