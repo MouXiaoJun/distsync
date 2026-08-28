@@ -197,7 +197,7 @@ func (rw *RWMutex) RUnlock(ctx context.Context) error {
 func (rw *RWMutex) guard(l lease.Lease, fence uint64) *Guard {
 	g := &Guard{handle: newHandle(rw.name, "rwmutex", rw.client.metrics, rw.client.tracer, l), fencing: fence}
 	if rw.cfg.autoRenew {
-		g.startRenewal(rw.cfg.ttl / 3)
+		g.startRenewal(renewalInterval(rw.cfg.ttl))
 	}
 	return g
 }

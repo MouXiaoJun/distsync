@@ -11,6 +11,7 @@ type config struct {
 	ttl       time.Duration
 	autoRenew bool
 	retry     retryPolicy
+	fencing   bool
 }
 
 // retryPolicy describes exponential backoff with jitter for acquisition.
@@ -59,11 +60,13 @@ func NoAutoRenew() Option {
 	return func(c *config) { c.autoRenew = false }
 }
 
-// Fencing is accepted for API clarity and compatibility. Fencing tokens are
-// enabled by default for exclusive locks (Mutex, RWMutex writers), so this
-// option is a no-op — it exists so call sites read their intent explicitly.
+// Fencing enables fencing tokens. They are enabled by default for the
+// exclusive locks (Mutex, RWMutex writers), so there this option is a
+// no-op. For Leader it opts into fencing: each leadership acquisition then
+// mints a strictly increasing token (see Leader.FencingToken) that the
+// leader can persist with its side effects, exactly like a mutex.
 func Fencing() Option {
-	return func(*config) {}
+	return func(c *config) { c.fencing = true }
 }
 
 // Retry sets the acquisition backoff bounds for this primitive (exponential

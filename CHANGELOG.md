@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-29
+
+### Added
+
+- Leader fencing: `dist.Fencing()` is now meaningful for `Leader`. Each
+  leadership acquisition mints a strictly increasing fencing token,
+  exposed as `Leader.FencingToken()` inside the callback — so a leader can
+  fence its side effects (reconciliation, settlement writes) exactly like a
+  mutex holder. Disabled by default; tokens increase across leadership
+  changes and across replicas.
+- Heartbeat jitter: automatic renewal runs at `ttl/3` with ±20% jitter, so
+  a fleet of holders that acquired simultaneously no longer renews on
+  aligned ticks.
+- Redis-outage resilience tests: `Lock`/`TryLock`/`RLock`/`Acquire`/
+  `Allow` all fail fast and honestly when the server is unreachable — and
+  an outage is never misreported as `ErrNotAcquired` (busy).
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

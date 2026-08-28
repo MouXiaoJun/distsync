@@ -138,6 +138,15 @@ expires, another replica takes over; the callback's context is canceled on
 loss so the old leader can shut down gracefully. `TryRun` gives a
 non-blocking variant (`ErrNotAcquired` when someone else is leader).
 
+To fence the leader's own writes (reconciliation, settlement), enable
+fencing — tokens increase across every leadership change:
+
+```go
+leader := client.Leader("settlement", distsync.Fencing())
+// inside the callback:
+fmt.Println(leader.FencingToken()) // strictly increasing per leadership
+```
+
 ### Distributed single-flight
 
 ```go
@@ -214,10 +223,9 @@ Zero-cost no-op defaults — if you install neither, there is no overhead.
 GitHub Actions runs gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25,
 and golangci-lint on every push and pull request.
 
-## Roadmap (v0.3+)
+## Roadmap (v0.4+)
 
-- RWMutex strict FIFO fairness, `Leader` fencing option, watchdog for
-  `NoAutoRenew` guards.
+- RWMutex strict FIFO fairness, watchdog for `NoAutoRenew` guards.
 - Formal spec notes on fencing / lease-expiry semantics.
 
 Deliberately out of scope: distributed map/queue/delayed
