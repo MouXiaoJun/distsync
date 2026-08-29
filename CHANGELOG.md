@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- LICENSE now carries the actual copyright holder (`Copyright (c) 2026
+  MouXiaoJun`) instead of a generic "contributors" line; MIT terms
+  unchanged. CONTRIBUTING documents the license terms for contributions.
+
 - Documentation polish: package comment now named `distsync` (was stale
   `dist`), README gained badges / table of contents / install section, and
   pkg.go.dev now renders type-level examples for Mutex, RWMutex,
