@@ -37,7 +37,13 @@ golangci-lint run ./...        # lint (standard set)
 
 CI runs the full suite against real Redis 7 and Valkey 8 on every push.
 
-## Releasing
+## License
+
+This project is MIT licensed (see [LICENSE](LICENSE)); the copyright holder
+is named in the license file. Contributions are accepted under the same
+terms. Do not add files under a different license without asking.
+
+
 
 1. Update `CHANGELOG.md` (move `[Unreleased]` into a versioned section).
 2. Tag and push:
