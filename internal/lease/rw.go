@@ -9,38 +9,57 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RWWriter is the writer role of a distributed read-write lock. It is an
-// exclusive lease whose acquisition also checks that no readers hold the
-// lock and announces writer intent (writer preference). Renew and Release
-// reuse the single-owner scripts on the writer key.
+// RWKeys are the Redis keys of one read-write lock. All of them are derived
+// from one hash-tagged name, so every multi-key script stays on a single
+// Redis Cluster slot.
+type RWKeys struct {
+	Writer   string // exclusive writer key
+	Readers  string // sorted set of active readers (score = expiry ms)
+	Fencing  string // fencing counter for writers
+	Waiters  string // FIFO arrival queue: sorted set, score = arrival seq
+	WaiterTS string // queue-member -> last attempt ms (crash detection)
+	Seq      string // monotonic arrival-sequence counter
+}
+
+// waiterTimeout returns how long a queue entry may go silent before being
+// declared crashed and purged. Must comfortably exceed the acquisition
+// backoff (default max 2s); 2x the lease TTL is a safe bound.
+func waiterTimeout(ttl time.Duration) int64 {
+	return (ttl * 2).Milliseconds()
+}
+
+// RWWriter is the writer role of a distributed read-write lock with strict
+// FIFO fairness: it joins the arrival queue and is only granted when it
+// reaches the head, no other writer holds, and no reader is active. Renew
+// and Release reuse the single-owner scripts on the writer key.
 type RWWriter struct {
-	id      string
-	writer  string // writer key
-	readers string // readers sorted set
-	fencing string // fencing counter key
-	waiting string // writer-waiting marker
-	rdb     redis.Cmdable
-	ttl     time.Duration
+	id   string
+	keys RWKeys
+	rdb  redis.Cmdable
+	ttl  time.Duration
 
 	mu        sync.Mutex
 	expiresAt time.Time
 }
 
 // NewRWWriter builds a writer lease. All keys must share a hash slot.
-func NewRWWriter(rdb redis.Cmdable, writer, readers, fencing, waiting string, ttl time.Duration) *RWWriter {
-	return &RWWriter{
-		id:      Token(),
-		writer:  writer,
-		readers: readers,
-		fencing: fencing,
-		waiting: waiting,
-		rdb:     rdb,
-		ttl:     ttl,
-	}
+func NewRWWriter(rdb redis.Cmdable, keys RWKeys, ttl time.Duration) *RWWriter {
+	return &RWWriter{id: Token(), keys: keys, rdb: rdb, ttl: ttl}
 }
 
 // ID implements Lease.
 func (w *RWWriter) ID() string { return w.id }
+
+// member is this writer's entry name in the arrival queue.
+func (w *RWWriter) member() string { return "W:" + w.id }
+
+// Dequeue removes a still-waiting writer from the arrival queue. Best-effort
+// cleanup for callers that give up (context canceled, failed TryLock) so the
+// queue keeps draining.
+func (w *RWWriter) Dequeue(ctx context.Context) {
+	_ = w.rdb.ZRem(ctx, w.keys.Waiters, w.member()).Err()
+	_ = w.rdb.HDel(ctx, w.keys.WaiterTS, w.member()).Err()
+}
 
 // Acquire implements Lease: a single, non-blocking attempt.
 func (w *RWWriter) Acquire(ctx context.Context) error {
@@ -49,12 +68,14 @@ func (w *RWWriter) Acquire(ctx context.Context) error {
 }
 
 // TryAcquire attempts a single acquisition and returns the fencing token on
-// success.
+// success. The caller joins the FIFO queue on the first attempt; repeated
+// attempts keep the position.
 func (w *RWWriter) TryAcquire(ctx context.Context) (uint64, error) {
 	res, err := lua.RWWriteLock.Run(
 		ctx, w.rdb,
-		[]string{w.writer, w.readers, w.fencing, w.waiting},
-		w.id, w.ttl.Milliseconds(), time.Now().UnixMilli(),
+		[]string{w.keys.Writer, w.keys.Readers, w.keys.Fencing,
+			w.keys.Waiters, w.keys.WaiterTS, w.keys.Seq},
+		w.id, w.ttl.Milliseconds(), time.Now().UnixMilli(), waiterTimeout(w.ttl),
 	).Int64()
 	if err != nil {
 		if err == redis.Nil {
@@ -71,7 +92,7 @@ func (w *RWWriter) TryAcquire(ctx context.Context) (uint64, error) {
 
 // Renew implements Lease.
 func (w *RWWriter) Renew(ctx context.Context) error {
-	ok, err := lua.SingleRenew.Run(ctx, w.rdb, []string{w.writer}, w.id, w.ttl.Milliseconds()).Int64()
+	ok, err := lua.SingleRenew.Run(ctx, w.rdb, []string{w.keys.Writer}, w.id, w.ttl.Milliseconds()).Int64()
 	if err != nil {
 		return err
 	}
@@ -87,7 +108,7 @@ func (w *RWWriter) Renew(ctx context.Context) error {
 
 // Release implements Lease (compare-and-delete on the writer key).
 func (w *RWWriter) Release(ctx context.Context) error {
-	ok, err := lua.SingleRelease.Run(ctx, w.rdb, []string{w.writer}, w.id).Int64()
+	ok, err := lua.SingleRelease.Run(ctx, w.rdb, []string{w.keys.Writer}, w.id).Int64()
 	if err != nil {
 		return err
 	}
@@ -104,7 +125,7 @@ func (w *RWWriter) Release(ctx context.Context) error {
 // Held implements Lease for the writer role: the writer key still stores
 // our token. Read-only — never extends.
 func (w *RWWriter) Held(ctx context.Context) (bool, error) {
-	val, err := w.rdb.Get(ctx, w.writer).Result()
+	val, err := w.rdb.Get(ctx, w.keys.Writer).Result()
 	if err == redis.Nil {
 		return false, nil
 	}
@@ -121,43 +142,43 @@ func (w *RWWriter) ExpiresAt() time.Time {
 	return w.expiresAt
 }
 
-// RWReader is the reader role of a distributed read-write lock: one reader
-// token in the shared readers sorted set. Acquisition is refused while a
-// writer holds the lock or is queued (writer preference). Renew and Release
-// reuse the sorted-set scripts shared with semaphore permits.
+// RWReader is the reader role of a distributed read-write lock with strict
+// FIFO fairness: one reader token in the shared readers set. Acquisition is
+// refused while a writer holds or while a writer is queued ahead. Renew and
+// Release reuse the sorted-set scripts shared with semaphore permits.
 type RWReader struct {
-	id      string
-	writer  string
-	readers string
-	waiting string
-	rdb     redis.Cmdable
-	ttl     time.Duration
+	id   string
+	keys RWKeys
+	rdb  redis.Cmdable
+	ttl  time.Duration
 
 	mu        sync.Mutex
 	expiresAt time.Time
 }
 
 // NewRWReader builds a reader lease.
-func NewRWReader(rdb redis.Cmdable, writer, readers, waiting string, ttl time.Duration) *RWReader {
-	return &RWReader{
-		id:      Token(),
-		writer:  writer,
-		readers: readers,
-		waiting: waiting,
-		rdb:     rdb,
-		ttl:     ttl,
-	}
+func NewRWReader(rdb redis.Cmdable, keys RWKeys, ttl time.Duration) *RWReader {
+	return &RWReader{id: Token(), keys: keys, rdb: rdb, ttl: ttl}
 }
 
 // ID implements Lease.
 func (r *RWReader) ID() string { return r.id }
 
+// member is this reader's entry name in the arrival queue.
+func (r *RWReader) member() string { return "R:" + r.id }
+
+// Dequeue removes a still-waiting reader from the arrival queue (best-effort).
+func (r *RWReader) Dequeue(ctx context.Context) {
+	_ = r.rdb.ZRem(ctx, r.keys.Waiters, r.member()).Err()
+	_ = r.rdb.HDel(ctx, r.keys.WaiterTS, r.member()).Err()
+}
+
 // Acquire implements Lease: a single, non-blocking attempt.
 func (r *RWReader) Acquire(ctx context.Context) error {
 	res, err := lua.RWReadLock.Run(
 		ctx, r.rdb,
-		[]string{r.writer, r.readers, r.waiting},
-		r.id, time.Now().UnixMilli(), r.ttl.Milliseconds(),
+		[]string{r.keys.Writer, r.keys.Readers, r.keys.Waiters, r.keys.WaiterTS, r.keys.Seq},
+		r.id, r.ttl.Milliseconds(), time.Now().UnixMilli(), waiterTimeout(r.ttl),
 	).Int64()
 	if err != nil {
 		if err == redis.Nil {
@@ -177,7 +198,7 @@ func (r *RWReader) Acquire(ctx context.Context) error {
 func (r *RWReader) Renew(ctx context.Context) error {
 	ok, err := lua.SemRenew.Run(
 		ctx, r.rdb,
-		[]string{r.readers},
+		[]string{r.keys.Readers},
 		time.Now().UnixMilli(), r.ttl.Milliseconds(), r.id,
 	).Int64()
 	if err != nil {
@@ -195,7 +216,7 @@ func (r *RWReader) Renew(ctx context.Context) error {
 
 // Release implements Lease.
 func (r *RWReader) Release(ctx context.Context) error {
-	removed, err := lua.SemRelease.Run(ctx, r.rdb, []string{r.readers}, r.id).Int64()
+	removed, err := lua.SemRelease.Run(ctx, r.rdb, []string{r.keys.Readers}, r.id).Int64()
 	if err != nil {
 		return err
 	}
@@ -212,7 +233,7 @@ func (r *RWReader) Release(ctx context.Context) error {
 // Held implements Lease for the reader role: our token is still in the
 // readers set with a non-expired score. Read-only — never extends.
 func (r *RWReader) Held(ctx context.Context) (bool, error) {
-	score, err := r.rdb.ZScore(ctx, r.readers, r.id).Result()
+	score, err := r.rdb.ZScore(ctx, r.keys.Readers, r.id).Result()
 	if err == redis.Nil {
 		return false, nil
 	}
