@@ -224,7 +224,15 @@ Zero-cost no-op defaults — if you install neither, there is no overhead.
 - Any go-redis v9 `Cmdable`: `*redis.Client`, `*redis.ClusterClient`, rings.
 - Go >= 1.21.
 
+## Semantics
+
+Exactly what this library guarantees — and does not — is specified in
+[docs/semantics.md](docs/semantics.md): fencing-token bounds, the
+lease-expiry two-holder window, clock-skew assumptions, failure modes, the
+guarantee table and the full key layout for ops.
+
 ## CI
+
 
 GitHub Actions runs on every push and pull request:
 
