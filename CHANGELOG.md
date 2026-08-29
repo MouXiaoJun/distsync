@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-29
+
+### Changed
+
+- RWMutex is now strictly FIFO-fair. Every contender (reader or writer)
+  joins a single arrival queue (`{name}:waiters`, scored by a monotonic
+  sequence); grants happen in arrival order. A reader never jumps a queued
+  writer, a writer never jumps anyone, and new arrivals behind a queued
+  writer wait — so no writer can be starved by a reader stream. Queued
+  readers may be granted together (they never conflict).
+- A waiter that gives up (context canceled or failed Try* call) leaves the
+  queue immediately; a crashed waiter is purged from the head after `2*ttl`
+  of silence, so the queue can never be blocked by a ghost. The old
+  best-effort "writer-waiting marker" is gone, replaced by the queue.
+
+### Fixed
+
+- `RWMutex` cancel-path cleanup used the canceled context to send its
+  dequeue commands, so they never executed and left a ghost queue entry
+  behind. Dequeue now runs with `context.WithoutCancel`.
+
+
 ### Added
 
 - Real-server integration testing: the whole test suite runs against a real

@@ -81,8 +81,11 @@ update()
 wg.Unlock(ctx)
 ```
 
-Writers queued behind active readers get priority over new readers
-(writer preference), so a writer can never be starved by a reader stream.
+Contention is **strictly FIFO**: every contender joins a single
+arrival queue, and grants happen in arrival order — a reader never jumps a
+queued writer, and a writer never jumps anyone. A crashed contender is
+purged from the queue automatically, and a canceled waiter leaves it
+immediately, so the lock can never be blocked by a ghost.
 
 ### Semaphore
 
@@ -231,9 +234,8 @@ GitHub Actions runs on every push and pull request:
   miniredis; set `DISTSYNC_TEST_REDIS_ADDR` to point it at any Redis-protocol
   server, e.g. `make test-redis`).
 
-## Roadmap (v0.5+)
+## Roadmap (v0.6+)
 
-- RWMutex strict FIFO fairness.
 - Formal spec notes on fencing / lease-expiry semantics.
 
 Deliberately out of scope: distributed map/queue/delayed

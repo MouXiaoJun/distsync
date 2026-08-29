@@ -33,10 +33,7 @@ type RWMutex struct {
 	name   string
 	cfg    config
 
-	writerKey  string
-	readersKey string
-	fencingKey string
-	waitingKey string
+	keys lease.RWKeys
 
 	holderMu    sync.Mutex
 	writeHolder *Guard
@@ -48,13 +45,17 @@ func (c *Client) RWMutex(name string, opts ...Option) *RWMutex {
 	cfg := c.resolved(opts...)
 	key := redisx.Key(name)
 	return &RWMutex{
-		client:     c,
-		name:       name,
-		cfg:        cfg,
-		writerKey:  redisx.Derived(key, "writer"),
-		readersKey: redisx.Derived(key, "readers"),
-		fencingKey: redisx.Derived(key, "fencing"),
-		waitingKey: redisx.Derived(key, "writer-waiting"),
+		client: c,
+		name:   name,
+		cfg:    cfg,
+		keys: lease.RWKeys{
+			Writer:   redisx.Derived(key, "writer"),
+			Readers:  redisx.Derived(key, "readers"),
+			Fencing:  redisx.Derived(key, "fencing"),
+			Waiters:  redisx.Derived(key, "waiters"),
+			WaiterTS: redisx.Derived(key, "waiter-ts"),
+			Seq:      redisx.Derived(key, "seq"),
+		},
 	}
 }
 
@@ -68,7 +69,7 @@ func (rw *RWMutex) Lock(ctx context.Context) (g *Guard, err error) {
 	ctx, finish := rw.client.tracer.Start(ctx, "distsync.rwmutex.lock")
 	defer func() { finish(err) }()
 
-	l := lease.NewRWWriter(rw.client.rdb, rw.writerKey, rw.readersKey, rw.fencingKey, rw.waitingKey, rw.cfg.ttl)
+	l := lease.NewRWWriter(rw.client.rdb, rw.keys, rw.cfg.ttl)
 	start := time.Now()
 	for attempt := 0; ; attempt++ {
 		fence, err := l.TryAcquire(ctx)
@@ -83,11 +84,13 @@ func (rw *RWMutex) Lock(ctx context.Context) (g *Guard, err error) {
 			return nil, fmt.Errorf("distsync: write lock %q: %w", rw.name, err)
 		}
 		if ctx.Err() != nil {
+			l.Dequeue(context.WithoutCancel(ctx)) // give up our place in the FIFO queue
 			rw.client.metrics.Acquire("rwmutex", rw.name, false, time.Since(start))
 			return nil, fmt.Errorf("distsync: write lock %q: %w", rw.name, ctx.Err())
 		}
 		select {
 		case <-ctx.Done():
+			l.Dequeue(context.WithoutCancel(ctx)) // give up our place in the FIFO queue
 			rw.client.metrics.Acquire("rwmutex", rw.name, false, time.Since(start))
 			return nil, fmt.Errorf("distsync: write lock %q: %w", rw.name, ctx.Err())
 		case <-time.After(rw.cfg.retry.delay(attempt)):
@@ -99,10 +102,11 @@ func (rw *RWMutex) Lock(ctx context.Context) (g *Guard, err error) {
 // or any reader holds the lock.
 func (rw *RWMutex) TryLock(ctx context.Context) (*Guard, error) {
 	ctxNonNil(ctx)
-	l := lease.NewRWWriter(rw.client.rdb, rw.writerKey, rw.readersKey, rw.fencingKey, rw.waitingKey, rw.cfg.ttl)
+	l := lease.NewRWWriter(rw.client.rdb, rw.keys, rw.cfg.ttl)
 	fence, err := l.TryAcquire(ctx)
 	if err != nil {
 		if errors.Is(err, lease.ErrBusy) {
+			l.Dequeue(context.WithoutCancel(ctx)) // TryLock never retries: leave the queue
 			rw.client.metrics.Acquire("rwmutex", rw.name, false, 0)
 			return nil, ErrNotAcquired
 		}
@@ -121,7 +125,7 @@ func (rw *RWMutex) RLock(ctx context.Context) (g *Guard, err error) {
 	ctx, finish := rw.client.tracer.Start(ctx, "distsync.rwmutex.rlock")
 	defer func() { finish(err) }()
 
-	l := lease.NewRWReader(rw.client.rdb, rw.writerKey, rw.readersKey, rw.waitingKey, rw.cfg.ttl)
+	l := lease.NewRWReader(rw.client.rdb, rw.keys, rw.cfg.ttl)
 	start := time.Now()
 	for attempt := 0; ; attempt++ {
 		err := l.Acquire(ctx)
@@ -136,11 +140,13 @@ func (rw *RWMutex) RLock(ctx context.Context) (g *Guard, err error) {
 			return nil, fmt.Errorf("distsync: read lock %q: %w", rw.name, err)
 		}
 		if ctx.Err() != nil {
+			l.Dequeue(context.WithoutCancel(ctx)) // give up our place in the FIFO queue
 			rw.client.metrics.Acquire("rwmutex-read", rw.name, false, time.Since(start))
 			return nil, fmt.Errorf("distsync: read lock %q: %w", rw.name, ctx.Err())
 		}
 		select {
 		case <-ctx.Done():
+			l.Dequeue(context.WithoutCancel(ctx)) // give up our place in the FIFO queue
 			rw.client.metrics.Acquire("rwmutex-read", rw.name, false, time.Since(start))
 			return nil, fmt.Errorf("distsync: read lock %q: %w", rw.name, ctx.Err())
 		case <-time.After(rw.cfg.retry.delay(attempt)):
@@ -152,10 +158,11 @@ func (rw *RWMutex) RLock(ctx context.Context) (g *Guard, err error) {
 // holds or is queued for the lock.
 func (rw *RWMutex) TryRLock(ctx context.Context) (*Guard, error) {
 	ctxNonNil(ctx)
-	l := lease.NewRWReader(rw.client.rdb, rw.writerKey, rw.readersKey, rw.waitingKey, rw.cfg.ttl)
+	l := lease.NewRWReader(rw.client.rdb, rw.keys, rw.cfg.ttl)
 	err := l.Acquire(ctx)
 	if err != nil {
 		if errors.Is(err, lease.ErrBusy) {
+			l.Dequeue(context.WithoutCancel(ctx)) // TryRLock never retries: leave the queue
 			rw.client.metrics.Acquire("rwmutex-read", rw.name, false, 0)
 			return nil, ErrNotAcquired
 		}
