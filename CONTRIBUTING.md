@@ -28,11 +28,14 @@ gratitude.
 ## Development
 
 ```sh
-go test ./... -race -count=1   # tests (miniredis-backed)
+go test ./... -race -count=1                 # unit tests (miniredis-backed)
+DISTSYNC_TEST_REDIS_ADDR=localhost:6379 go test ./... -race -count=1   # full suite against a real Redis/Valkey server
 go vet ./...                   # static checks
 gofmt -l .                     # formatting (must be empty)
 golangci-lint run ./...        # lint (standard set)
 ```
+
+CI runs the full suite against real Redis 7 and Valkey 8 on every push.
 
 ## Releasing
 
