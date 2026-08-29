@@ -76,3 +76,21 @@ jobs:
         env:
           DISTSYNC_TEST_REDIS_ADDR: localhost:6380
         run: go test ./... -race -count=1 -timeout 300s
+
+  coverage:
+    name: Coverage (>=75%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - name: Measure coverage
+        run: |
+          go test . -count=1 -coverprofile=coverage.out -timeout 300s
+          go tool cover -func=coverage.out | tail -1
+      - name: Enforce threshold
+        run: |
+          go tool cover -func=coverage.out | awk '$$1=="total:"{gsub("%","",$$3); if ($$3+0 < 75) { print "coverage " $$3 "% below threshold 75%"; exit 1 } print "coverage OK: " $$3 "%" }'
