@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-29
+
+### Added
+
+- Formal semantics specification ([docs/semantics.md](docs/semantics.md)):
+  fencing-token bounds, the lease-expiry two-holder window, clock-skew
+  assumptions, failure-mode behavior, the guarantee table and the full key
+  layout for operators.
+- `examples/cluster`: run every primitive against a real Redis Cluster
+  (start a 3-master cluster, then `go run ./examples/cluster`). Verified
+  locally against a live 3-master cluster: all multi-key Lua scripts execute
+  without CROSSSLOT errors.
+- CI coverage gate: the `coverage` job fails below 75% statement coverage.
+
+
 ### Added
 
 - Formal semantics specification ([docs/semantics.md](docs/semantics.md)):

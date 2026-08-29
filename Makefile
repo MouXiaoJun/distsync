@@ -15,3 +15,8 @@ lint: ## golangci-lint (standard set)
 
 fmt: ## fail if any file is not gofmt-formatted
 	@test -z "$$(gofmt -l .)"
+
+coverage: ## print statement coverage and fail below 75%
+	go test . -count=1 -coverprofile=coverage.out -timeout 300s
+	go tool cover -func=coverage.out | tail -1
+	@go tool cover -func=coverage.out | awk '$$1=="total:"{gsub("%","",$$3); if ($$3+0 < 75) { print "coverage too low: " $$3 "%"; exit 1 }}'
