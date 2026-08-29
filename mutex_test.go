@@ -213,26 +213,31 @@ func TestMutexUnlockConvenience(t *testing.T) {
 }
 
 // TestMutexGuardLostFiresOnExpiry verifies the guard's Lost channel closes
-// when the heartbeat detects that the lease expired server-side. (With
-// NoAutoRenew there is no heartbeat, so loss is only noticed on the next
-// explicit operation.)
-func TestMutexGuardLostFiresOnExpiry(t *testing.T) {
-	c, s := newTestClient(t)
+// TestMutexGuardLostFiresOnLeaseLoss verifies the guard's Lost channel
+// closes when the heartbeat detects the lease is gone server-side. We
+// simulate loss by deleting the key (equivalent to expiry or theft, and
+// deterministic on both miniredis and a real server — unlike FastForward,
+// which cannot outrun an active renewer). (With NoAutoRenew there is no
+// heartbeat, so loss is only noticed on the next explicit operation.)
+func TestMutexGuardLostFiresOnLeaseLoss(t *testing.T) {
+	c, _ := newTestClient(t)
 	mu := c.Mutex("lost-chan", Lease(150*time.Millisecond)) // autoRenew on
 
 	g, err := mu.Lock(context.Background())
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	fastForward(s, 200*time.Millisecond) // lease expires in miniredis time
+	if err := c.Redis().Del(context.Background(), redisx.Key("lost-chan")).Err(); err != nil {
+		t.Fatalf("del: %v", err)
+	}
 	select {
 	case <-g.Lost():
 	case <-time.After(3 * time.Second):
-		t.Fatal("Lost channel should close after the heartbeat detects expiry")
+		t.Fatal("Lost channel should close after the heartbeat detects loss")
 	}
 	// Manual renew must now report loss too.
 	if err := g.Renew(context.Background()); !errors.Is(err, ErrLost) {
-		t.Fatalf("renew after expiry should return ErrLost, got %v", err)
+		t.Fatalf("renew after loss should return ErrLost, got %v", err)
 	}
 }
 

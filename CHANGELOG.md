@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Real-server integration testing: the whole test suite runs against a real
+  Redis or Valkey server by setting `DISTSYNC_TEST_REDIS_ADDR` (see
+  `make test-redis`). CI now includes an integration job that runs every
+  test against Redis 7 and Valkey 8 on each push. `make test`/`test-race`/
+  `test-redis`/`lint`/`fmt` targets added.
+
+
 ## [0.4.0] - 2026-08-29
 
 ### Added

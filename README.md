@@ -223,8 +223,13 @@ Zero-cost no-op defaults — if you install neither, there is no overhead.
 
 ## CI
 
-GitHub Actions runs gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25,
-and golangci-lint on every push and pull request.
+GitHub Actions runs on every push and pull request:
+
+- gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25, plus golangci-lint;
+- an integration job that runs the **entire** test suite against real
+  **Redis 7** and real **Valkey 8** servers (the same suite normally runs on
+  miniredis; set `DISTSYNC_TEST_REDIS_ADDR` to point it at any Redis-protocol
+  server, e.g. `make test-redis`).
 
 ## Roadmap (v0.5+)
 
