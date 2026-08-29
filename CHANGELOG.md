@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Formal semantics specification ([docs/semantics.md](docs/semantics.md)):
+  fencing-token bounds, the lease-expiry two-holder window, clock-skew
+  assumptions, failure-mode behavior, the guarantee table and the full key
+  layout.
+
+
 ## [0.5.0] - 2026-08-29
 
 ### Changed
