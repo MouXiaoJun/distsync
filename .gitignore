@@ -5,3 +5,4 @@
 /distsync
 *.exe
 .DS_Store
+/cluster
