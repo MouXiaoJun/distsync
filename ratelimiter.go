@@ -94,11 +94,15 @@ func LeakyBucket() RateLimiterOption {
 	return func(c *rlConfig) { c.algorithm = AlgorithmLeakyBucket }
 }
 
-// Rate describes a limiter shape. Capacity is the burst size; PerSecond is
-// how fast the budget refills (tokens accumulate / requests drain).
+// Rate describes a limiter shape: how fast the budget refills and how much
+// can be stored as a burst.
 type Rate struct {
+	// PerSecond is the refill rate in tokens per second (for windowed
+	// algorithms it defines the window length: Capacity/PerSecond).
 	PerSecond float64
-	Capacity  float64
+	// Capacity is the burst size: the maximum number of tokens that can
+	// accumulate (for windowed algorithms, the maximum requests per window).
+	Capacity float64
 }
 
 // PerSecond builds a Rate that refills at n tokens/second with a burst of

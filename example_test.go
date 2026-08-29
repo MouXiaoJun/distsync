@@ -80,3 +80,115 @@ func mustAvailable(sem *distsync.Semaphore) int {
 	}
 	return n
 }
+
+func ExampleMutex() {
+	s, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	client := distsync.New(rdb)
+	mu := client.Mutex("payment:10001")
+
+	guard, err := mu.Lock(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("lock acquired, fencing token: %d\n", guard.FencingToken())
+
+	// A second instance of the same mutex cannot acquire while we hold it.
+	other := client.Mutex("payment:10001")
+	if _, err := other.TryLock(context.Background()); err != nil {
+		fmt.Printf("try-lock while held: %v\n", err)
+	}
+
+	if err := guard.Unlock(context.Background()); err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// lock acquired, fencing token: 1
+	// try-lock while held: distsync: not acquired
+}
+
+func ExampleRWMutex() {
+	s, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	client := distsync.New(rdb)
+	mu := client.RWMutex("config:tenant:1001")
+
+	rg, err := mu.RLock(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("read lock held")
+	_ = rg.Unlock(context.Background())
+
+	wg, err := mu.Lock(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("write lock held, fencing token: %d\n", wg.FencingToken())
+	_ = wg.Unlock(context.Background())
+
+	// Output:
+	// read lock held
+	// write lock held, fencing token: 1
+}
+
+func ExampleRateLimiter() {
+	s, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	client := distsync.New(rdb)
+	rl := client.RateLimiter("tenant:1001", distsync.PerSecond(10), distsync.SlidingWindow())
+
+	ok, _, err := rl.Allow(context.Background(), 1)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("request allowed: %v\n", ok)
+
+	// Output:
+	// request allowed: true
+}
+
+func ExampleLeader() {
+	s, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	client := distsync.New(rdb)
+	leader := client.Leader("scheduler")
+
+	err = leader.Run(context.Background(), func(ctx context.Context) error {
+		fmt.Println("leading: only one replica runs this")
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("leadership released")
+
+	// Output:
+	// leading: only one replica runs this
+	// leadership released
+}

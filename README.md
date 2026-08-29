@@ -1,5 +1,10 @@
 # distsync
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/MouXiaoJun/distsync.svg)](https://pkg.go.dev/github.com/MouXiaoJun/distsync)
+[![Go](https://img.shields.io/badge/Go-1.21+-blue)](https://go.dev/dl/)
+[![CI](https://github.com/MouXiaoJun/distsync/actions/workflows/ci.yml/badge.svg)](https://github.com/MouXiaoJun/distsync/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Distributed synchronization primitives for Go, backed by Redis and Valkey.**
 
 Not "another Redis client" — a `sync`-style toolkit. Where you would reach
@@ -17,6 +22,31 @@ if err != nil {
 }
 defer guard.Unlock(ctx)
 ```
+
+## Table of contents
+
+- [Install](#install)
+- [Primitives](#primitives)
+- [Quick start](#quick-start)
+  - [Mutex — with fencing token](#mutex--with-fencing-token)
+  - [RWMutex](#rwmutex)
+  - [Semaphore](#semaphore)
+  - [RateLimiter](#ratelimiter-four-algorithms)
+  - [Leader election](#leader-election)
+  - [Distributed single-flight](#distributed-single-flight)
+- [Design](#design)
+- [Semantics](#semantics)
+- [Compatibility](#compatibility)
+- [CI](#ci)
+- [Roadmap](#roadmap-v06)
+
+## Install
+
+```sh
+go get github.com/MouXiaoJun/distsync@latest
+```
+
+Requires Go 1.21+ and any go-redis v9 client.
 
 ## Primitives
 

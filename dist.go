@@ -1,9 +1,9 @@
-// Package dist provides distributed synchronization primitives for Go,
+// Package distsync provides distributed synchronization primitives for Go,
 // backed by Redis and Valkey.
 //
 // It is not "another Redis client": it is a sync-style toolkit. Where you
-// would reach for sync.Mutex, sync.RWMutex, or a counting channel inside one
-// process, dist gives you the same shape across processes:
+// would reach for sync.Mutex, sync.RWMutex, or a counting channel inside
+// one process, distsync gives you the same shape across processes:
 //
 //	client := distsync.New(rdb) // *redis.Client or *redis.ClusterClient
 //
@@ -14,16 +14,18 @@
 //	}
 //	defer guard.Unlock(ctx)
 //
-// Every primitive is built on one unified Lease layer (internal/lease),
-// which handles ownership tokens, TTL, background renewal, expiry, Redis
-// failures and context cancellation exactly once. Nothing here is a pile of
-// hand-rolled SET NX scripts.
+// Five primitives ship in v0.x: Mutex, RWMutex, Semaphore, RateLimiter and
+// Leader (see each type's documentation for usage). Every primitive is
+// built on one unified Lease layer (internal/lease), which handles
+// ownership tokens, TTL, background renewal, expiry, Redis failures and
+// context cancellation exactly once. Nothing here is a pile of hand-rolled
+// SET NX scripts.
 //
 // # Safety properties
 //
-//   - Fencing tokens (Mutex, RWMutex writers): each acquisition mints a
-//     strictly increasing token for the resource. Persist it with the side
-//     effect and reject writes whose stored token is not older:
+//   - Fencing tokens (Mutex, RWMutex writers, Leader): each acquisition
+//     mints a strictly increasing token for the resource. Persist it with
+//     the side effect and reject writes whose stored token is not older:
 //
 //     UPDATE orders SET status='paid', fencing_token=? WHERE id=? AND fencing_token < ?
 //
@@ -31,11 +33,16 @@
 //     so a stale holder can never release a newer owner's lease.
 //
 //   - Redis Cluster: every key a primitive touches is derived from one
-//     hash-tagged name (see redisx.Key), so all multi-key Lua scripts stay
-//     on a single slot and never hit CROSSSLOT errors.
+//     hash-tagged name, so all multi-key Lua scripts stay on a single slot
+//     and never hit CROSSSLOT errors. Verified against a live cluster (see
+//     examples/cluster) and in CI against Redis 7 and Valkey 8.
 //
 //   - No goroutine leaks: each guard/permit/leadership owns at most one
-//     renewal goroutine, stopped synchronously on release.
+//     renewal or watchdog goroutine, stopped synchronously on release.
+//
+// The precise guarantees — fencing bounds, the lease-expiry two-holder
+// window, clock-skew assumptions, failure modes — are specified in
+// docs/semantics.md.
 package distsync
 
 import (
