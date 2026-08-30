@@ -52,6 +52,8 @@ func (p *PermitSet) Acquire(ctx context.Context) error {
 // TryAcquire attempts to take n permits in one atomic step. It never blocks
 // and returns ErrBusy when the remaining capacity is insufficient.
 func (p *PermitSet) TryAcquire(ctx context.Context, n int) error {
+	started := time.Now()
+	deadline := requestExpiry(started, p.ttl)
 	if n < 1 {
 		return nil
 	}
@@ -60,7 +62,7 @@ func (p *PermitSet) TryAcquire(ctx context.Context, n int) error {
 		tokens[i] = p.id + "#" + strconv.Itoa(i)
 	}
 	args := make([]any, 0, 3+len(tokens))
-	args = append(args, time.Now().UnixMilli(), p.ttl.Milliseconds(), p.capacity)
+	args = append(args, started.UnixMilli(), p.ttl.Milliseconds(), p.capacity)
 	for _, t := range tokens {
 		args = append(args, t)
 	}
@@ -72,9 +74,13 @@ func (p *PermitSet) TryAcquire(ctx context.Context, n int) error {
 	}
 
 	p.mu.Lock()
-	p.tokens = tokens
+	p.tokens = tokens // Also needed to release a confirmed but late grant.
+	if !deadline.After(time.Now()) {
+		p.mu.Unlock()
+		return discardLateGrant(p)
+	}
 	p.acquired = true
-	p.expiresAt = time.Now().Add(p.ttl)
+	p.expiresAt = deadline
 	p.mu.Unlock()
 	return nil
 }
@@ -82,6 +88,8 @@ func (p *PermitSet) TryAcquire(ctx context.Context, n int) error {
 // Renew implements Lease. Ownership of every permit is checked first, so a
 // partially-expired grant is treated as fully lost.
 func (p *PermitSet) Renew(ctx context.Context) error {
+	started := time.Now()
+	deadline := requestExpiry(started, p.ttl)
 	p.mu.Lock()
 	tokens := append([]string(nil), p.tokens...)
 	p.mu.Unlock()
@@ -90,7 +98,7 @@ func (p *PermitSet) Renew(ctx context.Context) error {
 	}
 
 	args := make([]any, 0, 2+len(tokens))
-	args = append(args, time.Now().UnixMilli(), p.ttl.Milliseconds())
+	args = append(args, started.UnixMilli(), p.ttl.Milliseconds())
 	for _, t := range tokens {
 		args = append(args, t)
 	}
@@ -103,8 +111,13 @@ func (p *PermitSet) Renew(ctx context.Context) error {
 	}
 
 	p.mu.Lock()
-	p.expiresAt = time.Now().Add(p.ttl)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	if !p.expiresAt.After(time.Now()) || !deadline.After(time.Now()) {
+		return ErrLost
+	}
+	if deadline.After(p.expiresAt) {
+		p.expiresAt = deadline
+	}
 	return nil
 }
 
@@ -112,10 +125,7 @@ func (p *PermitSet) Renew(ctx context.Context) error {
 // permit tokens.
 func (p *PermitSet) Release(ctx context.Context) error {
 	p.mu.Lock()
-	tokens := p.tokens
-	p.tokens = nil
-	p.acquired = false
-	p.expiresAt = time.Time{}
+	tokens := append([]string(nil), p.tokens...)
 	p.mu.Unlock()
 	if len(tokens) == 0 {
 		return ErrLost
@@ -129,6 +139,11 @@ func (p *PermitSet) Release(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	p.tokens = nil
+	p.acquired = false
+	p.expiresAt = time.Time{}
+	p.mu.Unlock()
 	if removed != int64(len(tokens)) {
 		return ErrLost
 	}

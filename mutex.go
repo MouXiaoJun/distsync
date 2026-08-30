@@ -120,12 +120,19 @@ func (m *Mutex) TryLock(ctx context.Context) (*Guard, error) {
 func (m *Mutex) Unlock(ctx context.Context) error {
 	m.holderMu.Lock()
 	g := m.holder
-	m.holder = nil
 	m.holderMu.Unlock()
 	if g == nil {
 		return nil
 	}
-	return g.Unlock(ctx)
+	err := g.Unlock(ctx)
+	if err == nil || errors.Is(err, ErrLost) {
+		m.holderMu.Lock()
+		if m.holder == g {
+			m.holder = nil
+		}
+		m.holderMu.Unlock()
+	}
+	return err
 }
 
 func (m *Mutex) guard(l *lease.SingleOwner, fence uint64) *Guard {

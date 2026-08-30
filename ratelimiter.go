@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/MouXiaoJun/distsync/internal/lease"
@@ -112,9 +113,9 @@ func PerSecond(n float64) Rate {
 }
 
 // PerMinute builds a Rate that refills at n tokens/minute with a burst of
-// n/60 (one minute of budget).
+// n (one minute of budget).
 func PerMinute(n float64) Rate {
-	return Rate{PerSecond: n / 60, Capacity: n / 60}
+	return Rate{PerSecond: n / 60, Capacity: n}
 }
 
 // WithBurst overrides the capacity (burst size) of a Rate.
@@ -126,6 +127,10 @@ func (r Rate) WithBurst(capacity float64) Rate {
 // RateLimiter creates a rate limiter for the named resource. The default
 // algorithm is token bucket; pass distsync.FixedWindow(), distsync.
 // SlidingWindow() or distsync.LeakyBucket() to switch.
+// It panics unless rate and capacity are positive and finite, and the
+// refill period fits in time.Duration at millisecond precision. Windowed
+// algorithms additionally require a window of at least 1ms and a capacity
+// in [1, 2^53-1], so integer counts are exact in Redis Lua.
 func (c *Client) RateLimiter(name string, rate Rate, opts ...RateLimiterOption) *RateLimiter {
 	cfg := rlConfig{algorithm: AlgorithmTokenBucket}
 	for _, o := range opts {
@@ -139,8 +144,17 @@ func (c *Client) RateLimiter(name string, rate Rate, opts ...RateLimiterOption) 
 		rate:      rate.PerSecond,
 		algorithm: cfg.algorithm,
 	}
-	if rl.rate <= 0 || rl.capacity <= 0 {
-		panic("distsync: rate limiter requires positive rate and capacity")
+	if rl.rate <= 0 || rl.capacity <= 0 || math.IsNaN(rl.rate) || math.IsNaN(rl.capacity) || math.IsInf(rl.rate, 0) || math.IsInf(rl.capacity, 0) {
+		panic("distsync: rate limiter requires positive finite rate and capacity")
+	}
+	windowMs := rl.capacity / rl.rate * 1000
+	if windowMs > float64(math.MaxInt64/int64(time.Millisecond)) {
+		panic("distsync: rate limiter refill period exceeds time.Duration range")
+	}
+	if rl.algorithm == AlgorithmFixedWindow || rl.algorithm == AlgorithmSlidingWindow {
+		if windowMs < 1 || rl.capacity < 1 || rl.capacity > 1<<53-1 {
+			panic("distsync: windowed rate limiter requires a window of at least 1ms and capacity in [1, 2^53-1]")
+		}
 	}
 	return rl
 }
@@ -160,34 +174,54 @@ func (rl *RateLimiter) window() time.Duration {
 	return time.Duration(rl.capacity / rl.rate * float64(time.Second))
 }
 
+func (rl *RateLimiter) fixedWindowKey(nowMs int64) string {
+	return rl.key + ":" + strconv.FormatInt(nowMs/rl.window().Milliseconds(), 10)
+}
+
 // Allow checks whether n requests are admissible right now, without
 // blocking. When not allowed it returns how long the caller should wait
 // before retrying. n is a token count for token bucket / leaky bucket and a
-// request count for the windowed algorithms.
+// request count (rounded up to a whole request) for the windowed algorithms.
+// Negative or non-finite n, or a count exceeding Capacity after rounding,
+// returns an error without accessing Redis. Zero succeeds without consuming
+// budget, including when ctx is canceled.
 func (rl *RateLimiter) Allow(ctx context.Context, n float64) (allowed bool, retryAfter time.Duration, err error) {
 	ctxNonNil(ctx)
+	if n == 0 {
+		return true, 0, nil
+	}
+	if n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
+		return false, 0, fmt.Errorf("distsync: rate limiter %q: request count must be finite and non-negative", rl.name)
+	}
+	if rl.algorithm == AlgorithmFixedWindow || rl.algorithm == AlgorithmSlidingWindow {
+		n = math.Ceil(n)
+	}
+	if n > rl.capacity {
+		return false, 0, fmt.Errorf("distsync: rate limiter %q: request count %g exceeds capacity %g", rl.name, n, rl.capacity)
+	}
 	ctx, finish := rl.client.tracer.Start(ctx, "distsync.ratelimit.allow")
 	defer func() { finish(err) }()
 
 	switch rl.algorithm {
 	case AlgorithmFixedWindow:
-		return rl.allow(ctx, lua.RateLimitFixed,
-			rl.capacity, rl.window().Milliseconds(), time.Now().UnixMilli(), int64(math.Ceil(n)))
+		now := time.Now().UnixMilli()
+		return rl.allow(ctx, lua.RateLimitFixed, rl.fixedWindowKey(now),
+			rl.capacity, rl.window().Milliseconds(), now, int64(n))
 	case AlgorithmSlidingWindow:
-		return rl.allow(ctx, lua.RateLimitSliding,
+		return rl.allow(ctx, lua.RateLimitSliding, rl.key,
 			rl.capacity, rl.window().Milliseconds(), time.Now().UnixMilli(),
-			int64(math.Ceil(n)), lease.Token())
+			int64(n), lease.Token())
 	case AlgorithmLeakyBucket:
-		return rl.allow(ctx, lua.RateLimitLeaky,
+		return rl.allow(ctx, lua.RateLimitLeaky, rl.key,
 			rl.capacity, rl.rate, time.Now().UnixMilli(), n)
 	default:
-		return rl.allow(ctx, lua.RateLimit,
+		return rl.allow(ctx, lua.RateLimit, rl.key,
 			rl.capacity, rl.rate, time.Now().UnixMilli(), n)
 	}
 }
 
-func (rl *RateLimiter) allow(ctx context.Context, script *redis.Script, args ...any) (bool, time.Duration, error) {
-	res, err := script.Run(ctx, rl.client.rdb, []string{rl.key}, args...).Slice()
+func (rl *RateLimiter) allow(ctx context.Context, script *redis.Script, key string, args ...any) (bool, time.Duration, error) {
+	res, err := script.Run(ctx, rl.client.rdb, []string{key}, args...).Slice()
 	if err != nil {
 		return false, 0, err
 	}
@@ -201,12 +235,10 @@ func (rl *RateLimiter) allow(ctx context.Context, script *redis.Script, args ...
 
 // Acquire blocks until n requests are admissible or ctx is canceled. It
 // polls the limiter, sleeping exactly the retry-after the algorithm reports,
-// so contention does not hammer Redis.
+// so contention does not hammer Redis. The same input rules as Allow apply;
+// invalid or impossible requests return an error without waiting.
 func (rl *RateLimiter) Acquire(ctx context.Context, n float64) error {
 	ctxNonNil(ctx)
-	if n <= 0 {
-		return nil
-	}
 	for {
 		allowed, retryAfter, err := rl.Allow(ctx, n)
 		if err != nil {
@@ -240,6 +272,12 @@ func (rl *RateLimiter) Wait(ctx context.Context, n float64) (waited time.Duratio
 }
 
 // Reset empties the limiter state (used by tests and admin tooling).
+// For a fixed window it deletes only the current window's counter; older
+// windows retain their expiry. Concurrent requests may consume budget again.
 func (rl *RateLimiter) Reset(ctx context.Context) error {
-	return rl.client.rdb.Del(ctx, rl.key).Err()
+	key := rl.key
+	if rl.algorithm == AlgorithmFixedWindow {
+		key = rl.fixedWindowKey(time.Now().UnixMilli())
+	}
+	return rl.client.rdb.Del(ctx, key).Err()
 }

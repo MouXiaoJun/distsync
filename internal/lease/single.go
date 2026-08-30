@@ -49,6 +49,7 @@ func (l *SingleOwner) Acquire(ctx context.Context) error {
 // TryAcquire attempts a single acquisition and returns the fencing token
 // on success (0 when fencing is disabled).
 func (l *SingleOwner) TryAcquire(ctx context.Context) (uint64, error) {
+	deadline := requestExpiry(time.Now(), l.ttl)
 	fence := "0"
 	if l.fencing {
 		fence = "1"
@@ -66,13 +67,18 @@ func (l *SingleOwner) TryAcquire(ctx context.Context) (uint64, error) {
 	}
 
 	l.mu.Lock()
-	l.expiresAt = time.Now().Add(l.ttl)
+	if !deadline.After(time.Now()) {
+		l.mu.Unlock()
+		return 0, discardLateGrant(l)
+	}
+	l.expiresAt = deadline
 	l.mu.Unlock()
 	return uint64(res), nil
 }
 
 // Renew implements Lease.
 func (l *SingleOwner) Renew(ctx context.Context) error {
+	deadline := requestExpiry(time.Now(), l.ttl)
 	ok, err := lua.SingleRenew.Run(
 		ctx, l.rdb,
 		[]string{l.key},
@@ -86,8 +92,13 @@ func (l *SingleOwner) Renew(ctx context.Context) error {
 	}
 
 	l.mu.Lock()
-	l.expiresAt = time.Now().Add(l.ttl)
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	if !l.expiresAt.After(time.Now()) || !deadline.After(time.Now()) {
+		return ErrLost
+	}
+	if deadline.After(l.expiresAt) {
+		l.expiresAt = deadline
+	}
 	return nil
 }
 

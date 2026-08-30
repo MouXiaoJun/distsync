@@ -71,7 +71,9 @@ func TestRenewerStopIdempotent(t *testing.T) {
 	r.Stop() // second stop
 
 	r2 := NewRenewer(5*time.Millisecond, func(ctx context.Context) error { return nil }, nil)
-	r2.Stop() // stop without start
+	r2.Stop()  // stop without start
+	r2.Start() // a stopped renewer must not restart or close Done twice
+	r2.Stop()
 	select {
 	case <-r2.Done():
 	case <-time.After(3 * time.Second):
@@ -96,5 +98,30 @@ func TestRenewerNoGoroutineLeak(t *testing.T) {
 	}
 	if got := runtime.NumGoroutine(); got > before {
 		t.Fatalf("goroutines after 20 renewers: %d > baseline %d (leak?)", got, before)
+	}
+}
+
+func TestRenewerStopCancelsInFlightCall(t *testing.T) {
+	entered := make(chan struct{})
+	fallback := make(chan struct{})
+	r := NewRenewer(time.Millisecond, func(ctx context.Context) error {
+		close(entered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-fallback:
+			return ErrLost
+		}
+	}, nil)
+	r.Start()
+	<-entered
+	stopped := make(chan struct{})
+	go func() { r.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(200 * time.Millisecond):
+		close(fallback)
+		<-stopped
+		t.Fatal("Stop did not cancel the in-flight renewal")
 	}
 }

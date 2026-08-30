@@ -71,11 +71,13 @@ func (w *RWWriter) Acquire(ctx context.Context) error {
 // success. The caller joins the FIFO queue on the first attempt; repeated
 // attempts keep the position.
 func (w *RWWriter) TryAcquire(ctx context.Context) (uint64, error) {
+	started := time.Now()
+	deadline := requestExpiry(started, w.ttl)
 	res, err := lua.RWWriteLock.Run(
 		ctx, w.rdb,
 		[]string{w.keys.Writer, w.keys.Readers, w.keys.Fencing,
 			w.keys.Waiters, w.keys.WaiterTS, w.keys.Seq},
-		w.id, w.ttl.Milliseconds(), time.Now().UnixMilli(), waiterTimeout(w.ttl),
+		w.id, w.ttl.Milliseconds(), started.UnixMilli(), waiterTimeout(w.ttl),
 	).Int64()
 	if err != nil {
 		if err == redis.Nil {
@@ -85,13 +87,18 @@ func (w *RWWriter) TryAcquire(ctx context.Context) (uint64, error) {
 	}
 
 	w.mu.Lock()
-	w.expiresAt = time.Now().Add(w.ttl)
+	if !deadline.After(time.Now()) {
+		w.mu.Unlock()
+		return 0, discardLateGrant(w)
+	}
+	w.expiresAt = deadline
 	w.mu.Unlock()
 	return uint64(res), nil
 }
 
 // Renew implements Lease.
 func (w *RWWriter) Renew(ctx context.Context) error {
+	deadline := requestExpiry(time.Now(), w.ttl)
 	ok, err := lua.SingleRenew.Run(ctx, w.rdb, []string{w.keys.Writer}, w.id, w.ttl.Milliseconds()).Int64()
 	if err != nil {
 		return err
@@ -101,8 +108,13 @@ func (w *RWWriter) Renew(ctx context.Context) error {
 	}
 
 	w.mu.Lock()
-	w.expiresAt = time.Now().Add(w.ttl)
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if !w.expiresAt.After(time.Now()) || !deadline.After(time.Now()) {
+		return ErrLost
+	}
+	if deadline.After(w.expiresAt) {
+		w.expiresAt = deadline
+	}
 	return nil
 }
 
@@ -175,10 +187,12 @@ func (r *RWReader) Dequeue(ctx context.Context) {
 
 // Acquire implements Lease: a single, non-blocking attempt.
 func (r *RWReader) Acquire(ctx context.Context) error {
+	started := time.Now()
+	deadline := requestExpiry(started, r.ttl)
 	res, err := lua.RWReadLock.Run(
 		ctx, r.rdb,
 		[]string{r.keys.Writer, r.keys.Readers, r.keys.Waiters, r.keys.WaiterTS, r.keys.Seq},
-		r.id, r.ttl.Milliseconds(), time.Now().UnixMilli(), waiterTimeout(r.ttl),
+		r.id, r.ttl.Milliseconds(), started.UnixMilli(), waiterTimeout(r.ttl),
 	).Int64()
 	if err != nil {
 		if err == redis.Nil {
@@ -189,17 +203,23 @@ func (r *RWReader) Acquire(ctx context.Context) error {
 	_ = res
 
 	r.mu.Lock()
-	r.expiresAt = time.Now().Add(r.ttl)
+	if !deadline.After(time.Now()) {
+		r.mu.Unlock()
+		return discardLateGrant(r)
+	}
+	r.expiresAt = deadline
 	r.mu.Unlock()
 	return nil
 }
 
 // Renew implements Lease.
 func (r *RWReader) Renew(ctx context.Context) error {
+	started := time.Now()
+	deadline := requestExpiry(started, r.ttl)
 	ok, err := lua.SemRenew.Run(
 		ctx, r.rdb,
 		[]string{r.keys.Readers},
-		time.Now().UnixMilli(), r.ttl.Milliseconds(), r.id,
+		started.UnixMilli(), r.ttl.Milliseconds(), r.id,
 	).Int64()
 	if err != nil {
 		return err
@@ -209,8 +229,13 @@ func (r *RWReader) Renew(ctx context.Context) error {
 	}
 
 	r.mu.Lock()
-	r.expiresAt = time.Now().Add(r.ttl)
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	if !r.expiresAt.After(time.Now()) || !deadline.After(time.Now()) {
+		return ErrLost
+	}
+	if deadline.After(r.expiresAt) {
+		r.expiresAt = deadline
+	}
 	return nil
 }
 

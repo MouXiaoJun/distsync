@@ -72,3 +72,18 @@ func Token() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// requestExpiry counts from before the Redis request, not from its reply.
+// Reserve millisecond rounding and a small drift margin; arbitrary clock
+// jumps or replica rollback still require downstream fencing guarantees.
+func requestExpiry(start time.Time, ttl time.Duration) time.Time {
+	return start.Add(ttl - ttl/100 - time.Millisecond)
+}
+
+// discardLateGrant releases a confirmed acquisition that cannot be handed to
+// the caller. Compare-and-release only touches this attempt's owner tokens.
+func discardLateGrant(l Lease) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return errors.Join(ErrLost, l.Release(ctx))
+}

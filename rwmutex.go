@@ -179,12 +179,19 @@ func (rw *RWMutex) TryRLock(ctx context.Context) (*Guard, error) {
 func (rw *RWMutex) Unlock(ctx context.Context) error {
 	rw.holderMu.Lock()
 	g := rw.writeHolder
-	rw.writeHolder = nil
 	rw.holderMu.Unlock()
 	if g == nil {
 		return nil
 	}
-	return g.Unlock(ctx)
+	err := g.Unlock(ctx)
+	if err == nil || errors.Is(err, ErrLost) {
+		rw.holderMu.Lock()
+		if rw.writeHolder == g {
+			rw.writeHolder = nil
+		}
+		rw.holderMu.Unlock()
+	}
+	return err
 }
 
 // RUnlock releases the most recently acquired read lock (convenience; the
@@ -193,12 +200,19 @@ func (rw *RWMutex) Unlock(ctx context.Context) error {
 func (rw *RWMutex) RUnlock(ctx context.Context) error {
 	rw.holderMu.Lock()
 	g := rw.readHolder
-	rw.readHolder = nil
 	rw.holderMu.Unlock()
 	if g == nil {
 		return nil
 	}
-	return g.Unlock(ctx)
+	err := g.Unlock(ctx)
+	if err == nil || errors.Is(err, ErrLost) {
+		rw.holderMu.Lock()
+		if rw.readHolder == g {
+			rw.readHolder = nil
+		}
+		rw.holderMu.Unlock()
+	}
+	return err
 }
 
 func (rw *RWMutex) guard(l lease.Lease, fence uint64) *Guard {

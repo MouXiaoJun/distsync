@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -19,23 +18,24 @@ type Renewer struct {
 	renew    func(ctx context.Context) error
 	onLost   func()
 
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
 
 	startOnce sync.Once
-	started   atomic.Bool
 }
 
 // NewRenewer builds a renewer. onLost (may be nil) is invoked exactly when
 // renewal fails because ownership was definitively lost (ErrLost); it must
 // not block on the renewer itself.
 func NewRenewer(interval time.Duration, renew func(context.Context) error, onLost func()) *Renewer {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Renewer{
 		interval: interval,
 		renew:    renew,
 		onLost:   onLost,
-		stop:     make(chan struct{}),
+		ctx:      ctx,
+		cancel:   cancel,
 		done:     make(chan struct{}),
 	}
 }
@@ -44,7 +44,6 @@ func NewRenewer(interval time.Duration, renew func(context.Context) error, onLos
 // no-ops.
 func (r *Renewer) Start() {
 	r.startOnce.Do(func() {
-		r.started.Store(true)
 		go r.loop()
 	})
 }
@@ -56,17 +55,11 @@ func (r *Renewer) Done() <-chan struct{} { return r.done }
 // Stop terminates the loop and blocks until it has exited. Idempotent and
 // safe to call before Start (the loop simply never runs).
 func (r *Renewer) Stop() {
-	r.once.Do(func() {
-		close(r.stop)
-		if r.started.Load() {
-			<-r.done
-		} else {
-			// The loop never ran, so it has trivially "exited": close done
-			// ourselves. Without this, a Stop-before-Start would block
-			// forever waiting on a goroutine that never starts.
-			close(r.done)
-		}
-	})
+	r.cancel()
+	// Exactly one of Start or Stop owns closing done. Starting after Stop
+	// becomes a no-op, including when those calls race.
+	r.startOnce.Do(func() { close(r.done) })
+	<-r.done
 }
 
 func (r *Renewer) loop() {
@@ -77,10 +70,16 @@ func (r *Renewer) loop() {
 
 	for {
 		select {
-		case <-r.stop:
+		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			err := r.renew(context.Background())
+			if r.ctx.Err() != nil {
+				return
+			}
+			err := r.renew(r.ctx)
+			if r.ctx.Err() != nil {
+				return
+			}
 			if err == nil {
 				continue
 			}
