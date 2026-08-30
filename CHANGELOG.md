@@ -4,9 +4,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-30
 
 ### Changed
+
+- Reject expired/partially expired renewal and late replies; notify loss at confirmed deadlines and cancel in-flight renewal on stop.
+- Preserve owner tokens for release retries; clean up confirmed late acquisitions; retain Leader callback and cleanup errors.
+- Compatibility: PerMinute(n) now has capacity n. Invalid/impossible requests return errors; invalid rate configurations panic early. Fixed-window Reset deletes the current counter.
+- Document fencing assumptions and failure boundaries; complete the existing golang.org/x/sys v0.30.0 checksum.
 
 - LICENSE now carries the actual copyright holder (`Copyright (c) 2026
   MouXiaoJun`) instead of a generic "contributors" line; MIT terms

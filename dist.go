@@ -23,8 +23,8 @@
 //
 // # Safety properties
 //
-//   - Fencing tokens (Mutex, RWMutex writers, Leader): each acquisition
-//     mints a strictly increasing token for the resource. Persist it with
+//   - Fencing tokens (Mutex, RWMutex writers, Leader): ordering requires a
+//     counter that is never reset or rolled back. Atomically persist it with
 //     the side effect and reject writes whose stored token is not older:
 //
 //     UPDATE orders SET status='paid', fencing_token=? WHERE id=? AND fencing_token < ?
@@ -37,8 +37,9 @@
 //     and never hit CROSSSLOT errors. Verified against a live cluster (see
 //     examples/cluster) and in CI against Redis 7 and Valkey 8.
 //
-//   - No goroutine leaks: each guard/permit/leadership owns at most one
-//     renewal or watchdog goroutine, stopped synchronously on release.
+//   - Each guard/permit/leadership owns at most one renewal or watchdog loop.
+//     Release cancels and joins it; clients must honor cancellation or use
+//     bounded I/O timeouts (see docs/semantics.md).
 //
 // The precise guarantees — fencing bounds, the lease-expiry two-holder
 // window, clock-skew assumptions, failure modes — are specified in

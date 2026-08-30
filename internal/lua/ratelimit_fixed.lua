@@ -3,7 +3,7 @@
 -- `windowMs`. The window counter lives in a derived key, so windows never
 -- interfere and the counter auto-expires.
 --
--- KEYS[1] base key (hash-tagged)
+-- KEYS[1] current window key (hash-tagged, computed by the caller)
 -- ARGV[1] limit (max requests per window)
 -- ARGV[2] window in milliseconds
 -- ARGV[3] now in milliseconds
@@ -13,10 +13,11 @@
 local limit = tonumber(ARGV[1])
 local windowMs = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
-local requested = tonumber(ARGV[4])
+-- Keep the integer argument as a string for exact Redis integer parsing.
+local requested = ARGV[4]
 
 local w = math.floor(now / windowMs)
-local windowKey = KEYS[1] .. ':' .. w
+local windowKey = KEYS[1]
 
 local count = redis.call('INCRBY', windowKey, requested)
 redis.call('PEXPIRE', windowKey, windowMs * 2)

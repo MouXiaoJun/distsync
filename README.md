@@ -157,6 +157,29 @@ Pick an algorithm per limiter — each is a single atomic Lua script:
 strict := client.RateLimiter("api:public", distsync.PerSecond(100), distsync.SlidingWindow())
 ```
 
+`PerMinute(n)` refills at `n/60` tokens per second with capacity `n` (one
+minute of budget). This corrects the previous capacity of `n/60`; use
+`PerMinute(n).WithBurst(n/60)` explicitly if that smaller burst is intended.
+`WithBurst` also changes the window length for windowed algorithms.
+
+`Allow` and `Acquire` reject negative, NaN, infinite, or over-capacity
+requests before accessing Redis; `Acquire` does not wait for an impossible
+request. Zero succeeds without consuming budget or accessing Redis, even
+with an already-canceled context. Token and leaky buckets support fractional
+tokens. Fixed and sliding windows round each positive request up to a whole
+count, then check it against capacity (for example, `1.1` needs capacity `2`).
+
+Construction panics for non-positive/non-finite rates or capacities, or a
+refill period exceeding the `time.Duration` range at millisecond precision.
+Windowed algorithms additionally require capacity in `[1, 2^53-1]` and a
+window of at least 1ms; fractional milliseconds are truncated. Sliding windows
+still store one entry per counted request, so use moderate capacities.
+
+For fixed windows, Go computes `K:<window-index>` from the client's current
+time and supplies that full key to Lua explicitly. `Reset` deletes only
+the current window's counter; older counters expire normally. It does not
+pause concurrent requests or reset neighboring windows.
+
 ### Leader election
 
 ```go

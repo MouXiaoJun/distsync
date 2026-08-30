@@ -176,6 +176,11 @@ func TestMutexAutoRenewKeepsLeaseAlive(t *testing.T) {
 		if ttlLeft < ttl/2 {
 			t.Fatalf("iteration %d: TTL left = %v, renewal seems broken", i, ttlLeft)
 		}
+		select {
+		case <-g.Lost():
+			t.Fatal("renewed lease was marked lost at an earlier deadline")
+		default:
+		}
 	}
 }
 

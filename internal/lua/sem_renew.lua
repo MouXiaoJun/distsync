@@ -11,10 +11,12 @@
 --
 -- Returns: 1 when all permits were renewed, 0 otherwise.
 local zset = KEYS[1]
-local score = tonumber(ARGV[1]) + tonumber(ARGV[2])
+local now = tonumber(ARGV[1])
+local score = now + tonumber(ARGV[2])
 
 for i = 3, #ARGV do
-    if not redis.call('ZSCORE', zset, ARGV[i]) then
+    local previous = redis.call('ZSCORE', zset, ARGV[i])
+    if not previous or tonumber(previous) <= now then
         return 0
     end
 end

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/MouXiaoJun/distsync/internal/lease"
@@ -35,7 +34,7 @@ type Leader struct {
 	fencing bool
 
 	stateMu sync.Mutex
-	active  bool
+	active  *handle
 	fence   uint64
 }
 
@@ -58,7 +57,8 @@ func (l *Leader) Name() string { return l.name }
 
 // Run acquires leadership (retrying until ctx is canceled), then executes
 // fn while leader. Run returns fn's error; if the lease was lost before fn
-// completed, it returns ErrLeadershipLost.
+// completed, its error also matches ErrLeadershipLost. Cleanup errors are
+// preserved as well; callbacks must observe cancellation.
 func (l *Leader) Run(ctx context.Context, fn func(context.Context) error) (err error) {
 	ctxNonNil(ctx)
 	ctx, finish := l.client.tracer.Start(ctx, "distsync.leader.run")
@@ -120,78 +120,61 @@ func (l *Leader) TryRun(ctx context.Context, fn func(context.Context) error) (er
 func (l *Leader) IsLeader() bool {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
-	return l.active
+	return l.active != nil && l.active.lostCtx.Err() == nil
 }
 
 // FencingToken returns the fencing token minted for the current leadership
 // (0 when fencing is disabled, or when this handle is not the leader).
-// Tokens are strictly increasing per role across all replicas and across
-// leadership changes, so the leader can fence its side effects exactly like
-// a mutex holder:
+// Tokens increase per role while its Redis counter is preserved without
+// rollback. The destination must enforce them atomically (see docs/semantics.md):
 //
 //	UPDATE settlements SET ledger_id=?, fencing_token=? WHERE id=? AND fencing_token < ?
 func (l *Leader) FencingToken() uint64 {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
+	if l.active == nil || l.active.lostCtx.Err() != nil {
+		return 0
+	}
 	return l.fence
 }
 
 // runHeld executes fn while this handle provably holds the leader lease.
-func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fence uint64, fn func(context.Context) error) error {
+func (l *Leader) runHeld(ctx context.Context, le *lease.SingleOwner, fence uint64, fn func(context.Context) error) (err error) {
+	h := newHandle(l.name, "leader", l.client.metrics, l.client.tracer, le)
 	l.stateMu.Lock()
-	l.active = true
+	l.active = h
 	l.fence = fence
 	l.stateMu.Unlock()
 	defer func() {
 		l.stateMu.Lock()
-		l.active = false
-		l.fence = 0
+		if l.active == h {
+			l.active = nil
+			l.fence = 0
+		}
 		l.stateMu.Unlock()
 	}()
 
-	// LIFO order on return: cancel callback ctx first, stop renewal, then
-	// release the lease (so a queued replica can take over promptly).
-	leadCtx, leadCancel := context.WithCancel(ctx)
-	defer leadCancel()
-
-	var lost atomic.Bool
+	leadCtx, leadCancel := context.WithCancelCause(ctx)
+	stopLost := context.AfterFunc(h.lostCtx, func() { leadCancel(ErrLeadershipLost) })
 	if l.cfg.autoRenew {
-		r := lease.NewRenewer(renewalInterval(l.cfg.ttl), func(rctx context.Context) error {
-			return le.Renew(rctx)
-		}, func() {
-			lost.Store(true)
-			leadCancel()
-		})
-		r.Start()
-		defer r.Stop()
+		h.startRenewal(renewalInterval(l.cfg.ttl))
 	} else if l.cfg.watchdog {
-		// NoAutoRenew + Watchdog: detect lease expiry without extending it,
-		// so a non-renewing leader still fails over promptly.
-		r := lease.NewRenewer(renewalInterval(l.cfg.ttl), func(rctx context.Context) error {
-			held, err := le.Held(rctx)
-			if err != nil {
-				return err
-			}
-			if !held {
-				return lease.ErrLost
-			}
-			return nil
-		}, func() {
-			lost.Store(true)
-			leadCancel()
-		})
-		r.Start()
-		defer r.Stop()
+		h.startWatchdog(renewalInterval(l.cfg.ttl))
 	}
 	defer func() {
+		stopLost()
+		leadCancel(nil)
+		h.stop()
 		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = le.Release(rctx)
+		if releaseErr := h.release(rctx); releaseErr != nil {
+			err = errors.Join(err, releaseErr)
+		}
 	}()
 
-	err := fn(leadCtx)
-	if err == nil && lost.Load() {
-		return ErrLeadershipLost
+	err = fn(leadCtx)
+	if h.lostCtx.Err() != nil {
+		return errors.Join(err, ErrLeadershipLost)
 	}
 	return err
 }

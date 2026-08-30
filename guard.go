@@ -23,11 +23,15 @@ type handle struct {
 	leas      lease.Lease
 	renewer   *lease.Renewer
 
-	released atomic.Bool
+	released    atomic.Bool
+	releaseMu   sync.Mutex
+	releaseDone bool
 
-	lostCtx    context.Context
-	lostCancel context.CancelFunc
-	stopOnce   sync.Once
+	lostCtx       context.Context
+	lostCancel    context.CancelFunc
+	stopOnce      sync.Once
+	timerMu       sync.Mutex
+	deadlineTimer *time.Timer
 }
 
 func newHandle(resource, primitive string, m Metrics, t Tracer, l lease.Lease) *handle {
@@ -52,6 +56,7 @@ func (h *handle) startRenewal(interval time.Duration) {
 		h.metrics.RenewalStopped(h.primitive, h.resource, "lost")
 		h.markLost()
 	})
+	h.checkDeadline()
 	h.renewer.Start()
 }
 
@@ -60,51 +65,80 @@ func (h *handle) startRenewal(interval time.Duration) {
 // without keeping it alive. Transient Redis errors are retried, not fatal.
 func (h *handle) startWatchdog(interval time.Duration) {
 	h.renewer = lease.NewRenewer(interval, func(ctx context.Context) error {
-		held, err := h.leas.Held(ctx)
-		if err != nil {
-			return err
-		}
-		if !held {
-			return lease.ErrLost
-		}
-		return nil
+		return h.withLeaseDeadline(ctx, func(ctx context.Context) error {
+			held, err := h.leas.Held(ctx)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return lease.ErrLost
+			}
+			return nil
+		})
 	}, func() {
 		h.metrics.RenewalStopped(h.primitive, h.resource, "lost")
 		h.markLost()
 	})
+	h.checkDeadline()
 	h.renewer.Start()
 }
 
-// release performs the idempotent release: at most one caller actually
-// releases; later calls return nil.
+// checkDeadline runs independently of Redis calls and heartbeat intervals.
+// A successful renewal moves ExpiresAt; the old timer then follows that deadline.
+func (h *handle) checkDeadline() {
+	h.timerMu.Lock()
+	defer h.timerMu.Unlock()
+	if h.lostCtx.Err() != nil {
+		return
+	}
+	remaining := time.Until(h.leas.ExpiresAt())
+	if remaining <= 0 {
+		h.lostCancel()
+		h.deadlineTimer = nil
+		return
+	}
+	h.deadlineTimer = time.AfterFunc(remaining, h.checkDeadline)
+}
+
+// release stops local use immediately. An uncertain remote release may be
+// retried with the same owner token; completed releases remain idempotent.
 func (h *handle) release(ctx context.Context) (err error) {
-	if !h.released.CompareAndSwap(false, true) {
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	if h.releaseDone {
 		return nil
 	}
+	h.stop()
 	ctx, finish := h.tracer.Start(ctx, "distsync.release")
 	defer func() { finish(err) }()
 
+	err = h.leas.Release(ctx)
+	h.metrics.Release(h.primitive, h.resource)
+	h.releaseDone = err == nil || errors.Is(err, lease.ErrLost)
+	return err
+}
+
+// stop ends local ownership and joins background work before remote cleanup.
+func (h *handle) stop() {
+	h.released.Store(true)
+	h.markLost()
 	h.stopOnce.Do(func() {
 		if h.renewer != nil {
 			h.metrics.RenewalStopped(h.primitive, h.resource, "released")
 			h.renewer.Stop()
 		}
 	})
-	err = h.leas.Release(ctx)
-	h.metrics.Release(h.primitive, h.resource)
-	h.markLost()
-	return err
 }
 
 // renew refreshes the lease, either manually or from the heartbeat.
 func (h *handle) renew(ctx context.Context) (err error) {
-	if h.released.Load() {
+	if h.released.Load() || h.lostCtx.Err() != nil {
 		return ErrLost
 	}
 	ctx, finish := h.tracer.Start(ctx, "distsync.renew")
 	defer func() { finish(err) }()
 
-	err = h.leas.Renew(ctx)
+	err = h.withLeaseDeadline(ctx, h.leas.Renew)
 	h.metrics.Renew(h.primitive, h.resource, err == nil)
 	if err != nil && errors.Is(err, lease.ErrLost) {
 		h.markLost()
@@ -112,8 +146,42 @@ func (h *handle) renew(ctx context.Context) (err error) {
 	return err
 }
 
+// withLeaseDeadline bounds an ownership check by the last confirmed local
+// deadline. The timer notifies the holder even if Redis ignores cancellation;
+// Stop still waits for that client's I/O to return.
+func (h *handle) withLeaseDeadline(ctx context.Context, call func(context.Context) error) error {
+	if h.released.Load() || h.lostCtx.Err() != nil {
+		return ErrLost
+	}
+	deadline := h.leas.ExpiresAt()
+	if !deadline.After(time.Now()) {
+		h.markLost()
+		return ErrLost
+	}
+	callCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	stop := context.AfterFunc(callCtx, func() {
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) && !h.leas.ExpiresAt().After(time.Now()) {
+			h.markLost()
+		}
+	})
+	defer stop()
+	err := call(callCtx)
+	if h.lostCtx.Err() != nil || errors.Is(err, ErrLost) || !h.leas.ExpiresAt().After(time.Now()) {
+		h.markLost()
+		return errors.Join(ErrLost, err)
+	}
+	return err
+}
+
 func (h *handle) markLost() {
 	h.lostCancel()
+	h.timerMu.Lock()
+	defer h.timerMu.Unlock()
+	if h.deadlineTimer != nil {
+		h.deadlineTimer.Stop()
+		h.deadlineTimer = nil
+	}
 }
 
 // Guard is the handle returned by Lock/TryLock (and RLock/TryRLock). It
@@ -124,9 +192,9 @@ type Guard struct {
 	fencing uint64
 }
 
-// FencingToken returns the strictly increasing fencing token minted for
-// this acquisition. Use it to make side effects safe against a stale
-// holder:
+// FencingToken returns the token minted for this acquisition. Ordering requires
+// that its Redis counter never rolls back; the destination must atomically
+// enforce it with each side effect (see docs/semantics.md):
 //
 //	UPDATE orders SET status='paid', fencing_token=? WHERE id=? AND fencing_token < ?
 //
@@ -155,8 +223,8 @@ func (g *Guard) Renew(ctx context.Context) error {
 }
 
 // Unlock releases the lease and stops background renewal. It is idempotent:
-// the first call releases, subsequent calls return nil. It returns ErrLost
-// when the lease had already expired before the unlock.
+// completed releases return nil on subsequent calls. Transport failures may
+// be retried. It returns ErrLost when the lease was already gone.
 func (g *Guard) Unlock(ctx context.Context) error {
 	return g.release(ctx)
 }
