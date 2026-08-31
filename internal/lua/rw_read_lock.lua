@@ -27,6 +27,13 @@ local now = tonumber(ARGV[3])
 local waiterTimeout = tonumber(ARGV[4])
 local member = 'R:' .. token
 
+-- Transport retries return the original live grant without renewing it or
+-- queueing behind a writer that arrived after this reader was granted.
+local owned = redis.call('ZSCORE', readers, token)
+if owned and tonumber(owned) > now then
+    return 1
+end
+
 -- Join or refresh our place in the arrival queue.
 local seq = redis.call('ZSCORE', waiters, member)
 if not seq then

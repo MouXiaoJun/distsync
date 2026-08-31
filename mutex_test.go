@@ -150,12 +150,11 @@ func TestMutexDoubleUnlockIdempotent(t *testing.T) {
 }
 
 // TestMutexAutoRenewKeepsLeaseAlive proves the heartbeat keeps the key's
-// TTL near-full: each FastForward jump is followed by a real-time window in
-// which the renewer must tick and reset the TTL. Without renewal the TTL
-// would decay toward 0 and expire.
+// TTL near-full. Observe a completed heartbeat rather than assuming a fixed
+// sleep always contains one, particularly under race instrumentation.
 func TestMutexAutoRenewKeepsLeaseAlive(t *testing.T) {
 	c, s := newTestClient(t)
-	ttl := 300 * time.Millisecond
+	ttl := time.Second
 	mu := c.Mutex("heartbeat", Lease(ttl)) // AutoRenew is default-on
 
 	g, err := mu.Lock(context.Background())
@@ -164,15 +163,27 @@ func TestMutexAutoRenewKeepsLeaseAlive(t *testing.T) {
 	}
 	defer func() { _ = g.Unlock(context.Background()) }()
 
-	for i := 0; i < 3; i++ {
-		fastForward(s, 250*time.Millisecond) // jump past the previous TTL
-		time.Sleep(150 * time.Millisecond)   // renewer ticks here (interval ttl/3)
+	for i := 0; i < 4; i++ {
+		previous := g.ExpiresAt()
+		if s != nil {
+			s.FastForward(ttl / 2) // miniredis TTLs do not advance with wall time
+		}
+		deadline := time.Now().Add(2 * ttl)
+		for !g.ExpiresAt().After(previous) {
+			if time.Now().After(deadline) {
+				t.Fatal("heartbeat did not advance the confirmed expiry")
+			}
+			select {
+			case <-g.Lost():
+				t.Fatal("lease lost before renewal completed")
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 		ttlLeft, err := c.Redis().PTTL(context.Background(), redisx.Key("heartbeat")).Result()
 		if err != nil {
 			t.Fatalf("pttl: %v", err)
 		}
-		// Renewal reset the TTL to ~ttl after the jump; if renewal were
-		// broken, the key would have expired at the first jump (TTL <= 0).
+		// Confirm both the local deadline and real server TTL were extended.
 		if ttlLeft < ttl/2 {
 			t.Fatalf("iteration %d: TTL left = %v, renewal seems broken", i, ttlLeft)
 		}

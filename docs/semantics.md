@@ -51,11 +51,21 @@ WHERE id=10001 AND fencing_token < ?;
 
 - Tokens are monotonic **per resource name**; different resources have
   independent counters.
-- A token is minted only on a successful acquisition; failed attempts do
-  not consume the counter.
+- Contention denials do not consume the counter. A server-committed acquisition
+  does consume it even if its reply is lost and the caller returns an error.
+  A retry of a committed acquisition with the same
+  owner token returns the original live grant without incrementing or renewing
+  it. If every reply is lost the caller still receives a transport error, not
+  a usable grant; the remote grant expires/reclaims normally.
 - The counter key (`{name}:fencing`) is created on first acquisition and
   **never expires** (no TTL is set on it). If an operator deletes it, the
   sequence restarts — treat that like resetting a database sequence.
+- Restart with an intact, up-to-date counter can continue the sequence. Restart
+  without persistence loses it and can return `1` again. An old persisted
+  snapshot can roll it back too: simply enabling RDB/AOF is not a proof of
+  no acknowledged-write loss. The library cannot repair that history. Stop
+  affected writers and reconcile downstream fencing state before resuming;
+  never silently clear the downstream high-water mark to accept lower tokens.
 - No TTL does not protect a counter from eviction, restoring an old snapshot,
   or losing asynchronous replication writes during failover. `WAIT` does not
   turn Redis into a strongly consistent store. See the official
@@ -92,10 +102,12 @@ The library's response:
   Loss may mean "no longer provably valid", not a confirmed new owner.
   Scheduling and GC pauses still prevent real-time notification guarantees.
 
-**Clock-skew assumption.** TTL-based leases assume the server clock (which
-enforces expiry) and client clocks (which stamp sorted-set scores for
-permits/readers) are roughly synchronized. Moderate skew is tolerated by
-the `ttl/3` renewal margin; keep skew well below `ttl/3`.
+**Clock-skew assumption.** TTL-based leases assume bounded clock drift. The
+server enforces key expiry; client wall clocks stamp and compare sorted-set
+scores for permits/readers. Clock jumps or a fast peer can invalidate that
+model. The `ttl/3` renewal interval is not a clock-skew safety proof; the local
+1%+1ms deduction is only a small conservative margin, not an arbitrary-skew
+guarantee. Keep clocks synchronized and fence supported destinations.
 
 **Recommendation.** Use `ttl ≥ 10s`, and larger than your longest expected
 GC pause or network stall. Fencing protects only the destinations and failure
@@ -120,6 +132,7 @@ Unlock is a compare-and-delete on the owner token, so:
 |---|---|
 | Redis unreachable at acquire | Operation returns an error. An outage is **never** reported as `ErrNotAcquired` (busy) — callers can distinguish contention from failure. |
 | Redis unreachable while held | Retry within confirmed validity; renewal/watchdog revoke local use when validity cannot be established. A newer holder may already exist. |
+| Restart loses/rolls back data | Grants may disappear and fencing counters may repeat/decrease. Lost local handles never revive. Fencing order is not guaranteed. |
 | Process crash | The lease expires after `ttl`; permits and read locks are reclaimed atomically on the next acquire. |
 | Queue ghost (RWMutex) | A canceled waiter dequeues itself; a crashed waiter is purged from the queue head after `2*ttl` of silence. |
 | Clock skew | Degrades to the §3 assumption; fencing is conditional on §2, not a cure for arbitrary skew or counter rollback. |
@@ -135,7 +148,8 @@ Guaranteed:
   Backends must honor context cancellation or have bounded I/O timeouts; a
   custom client that blocks forever cannot be forcibly terminated by the library.
 - Redis Cluster safety: every key of a primitive shares one hash slot.
-- Deterministic FIFO ordering for RWMutex contention.
+- FIFO ordering for live RWMutex contenders under the clock/silence-timeout
+  assumptions; stalled contenders can be purged and rejoin at a new position.
 
 Not guaranteed (and no Redis lock can):
 
@@ -164,6 +178,17 @@ All keys are derived from the hash-tagged resource name; `K = {name}`.
 | RateLimiter (fixed window) | `K:<window-start>` (counter) |
 | RateLimiter (sliding) | `K` (sorted set of request stamps) |
 
-Primitives with no contention hold no live keys: mutex/leader keys vanish
-on unlock, permit entries are reaped on the next acquire, rate-limiter keys
-expire after they would drain.
+Mutex/leader lease keys vanish on unlock, but fencing counters deliberately
+remain. Permit entries are reaped on release or the next acquire; queue metadata
+and rate-limiter keys expire. No-contention does not mean zero Redis keys.
+
+## 8. Reproducible fault evidence
+
+`bash scripts/check-real.sh redis:7-alpine` and the same command with
+`valkey/valkey:8` run full ordinary and race suites on self-created loopback
+containers. `TestRealRedis*` additionally owns separate containers it can kill
+and restart. No existing server address/container ID is accepted by the fault
+harness. It holds/drops real TCP response bytes after server execution, checks
+terminal loss and owner-safe release, and contrasts a saved counter with a
+data-losing restart. This is a finite, single-node regression matrix, not a
+distributed proof, failover certification, or validation of arbitrary clocks.

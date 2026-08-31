@@ -15,6 +15,15 @@ local fencingKey = KEYS[2]
 local token = ARGV[1]
 local ttl = tonumber(ARGV[2])
 
+-- A transport retry may follow a committed acquisition with a lost reply.
+-- Return that same grant without extending it or minting another fence.
+if redis.call('GET', lockKey) == token then
+    if ARGV[3] == '1' then
+        return tonumber(redis.call('GET', fencingKey))
+    end
+    return 0
+end
+
 if redis.call('SET', lockKey, token, 'NX', 'PX', ttl) then
     if ARGV[3] == '1' then
         return redis.call('INCR', fencingKey)

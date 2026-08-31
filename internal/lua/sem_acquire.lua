@@ -19,6 +19,16 @@ local capacity = tonumber(ARGV[3])
 redis.call('ZREMRANGEBYSCORE', zset, '-inf', now)
 local used = redis.call('ZCARD', zset)
 local requested = #ARGV - 3
+local owned = 0
+for i = 4, #ARGV do
+    if redis.call('ZSCORE', zset, ARGV[i]) then
+        owned = owned + 1
+    end
+end
+-- A retry of the same grant must neither count it twice nor refresh expiry.
+if owned == requested then
+    return used
+end
 if used + requested > capacity then
     return nil
 end
