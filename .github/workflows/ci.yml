@@ -76,6 +76,14 @@ jobs:
         env:
           DISTSYNC_TEST_REDIS_ADDR: localhost:6380
         run: go test ./... -race -count=1 -timeout 300s
+      - name: Isolated Redis fault regressions
+        env:
+          DISTSYNC_FAULT_IMAGE: redis:7
+        run: go test ./... -race -run TestRealRedis -count=1 -timeout 300s
+      - name: Isolated Valkey fault regressions
+        env:
+          DISTSYNC_FAULT_IMAGE: valkey/valkey:8
+        run: go test ./... -race -run TestRealRedis -count=1 -timeout 300s
 
   coverage:
     name: Coverage (>=75%)
@@ -93,4 +101,4 @@ jobs:
           go tool cover -func=coverage.out | tail -1
       - name: Enforce threshold
         run: |
-          go tool cover -func=coverage.out | awk '$$1=="total:"{gsub("%","",$$3); if ($$3+0 < 75) { print "coverage " $$3 "% below threshold 75%"; exit 1 } print "coverage OK: " $$3 "%" }'
+          go tool cover -func=coverage.out | awk '$1=="total:"{seen=1; gsub("%","",$3); if ($3+0 < 75) { print "coverage " $3 "% below threshold 75%"; exit 1 } print "coverage OK: " $3 "%" } END { if (!seen) exit 1 }'

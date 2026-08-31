@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/MouXiaoJun/distsync/internal/lua"
 )
 
 func TestRateLimiterBurstExhausted(t *testing.T) {
@@ -167,13 +169,27 @@ func TestRateLimiterSlidingWindow(t *testing.T) {
 func TestRateLimiterLeakyBucket(t *testing.T) {
 	c, _ := newTestClient(t)
 	rl := c.RateLimiter("leaky:1", PerSecond(10).WithBurst(10), LeakyBucket())
+	// The algorithm accepts a client timestamp. Freeze it while filling: ten
+	// real network round trips can exceed 100ms and legitimately drain a token.
+	// Reuse the production script/response path without adding a library clock.
+	if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+		t.Fatalf("first public request: ok=%v err=%v", ok, err)
+	}
+	now, err := c.Redis().HGet(context.Background(), rl.key, "ts").Int64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow := func(n float64) (bool, time.Duration, error) {
+		return rl.allow(context.Background(), lua.RateLimitLeaky, rl.key,
+			rl.capacity, rl.rate, now, n)
+	}
 
-	for i := 0; i < 10; i++ {
-		if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+	for i := 1; i < 10; i++ {
+		if ok, _, err := allow(1); err != nil || !ok {
 			t.Fatalf("request %d: ok=%v err=%v", i, ok, err)
 		}
 	}
-	ok, retry, err := rl.Allow(context.Background(), 1)
+	ok, retry, err := allow(1)
 	if err != nil {
 		t.Fatalf("allow: %v", err)
 	}
@@ -184,8 +200,8 @@ func TestRateLimiterLeakyBucket(t *testing.T) {
 		t.Fatalf("retry-after should be positive, got %v", retry)
 	}
 
-	time.Sleep(200 * time.Millisecond) // drains 2 tokens at 10/s
-	if ok, _, err := rl.Allow(context.Background(), 1); err != nil || !ok {
+	now += 200 // drains exactly 2 tokens at 10/s
+	if ok, _, err := allow(1); err != nil || !ok {
 		t.Fatalf("request after drain: ok=%v err=%v", ok, err)
 	}
 }

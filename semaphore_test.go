@@ -122,16 +122,31 @@ func TestSemaphoreTryAcquire(t *testing.T) {
 
 func TestSemaphoreRenewKeepsPermitAlive(t *testing.T) {
 	c, _ := newTestClient(t)
-	sem := c.Semaphore("renewed", 1, Lease(200*time.Millisecond)) // autoRenew on
+	// This tests successful renewal, not an unrealistically short scheduling
+	// deadline under race instrumentation (loss-on-stall has separate tests).
+	const ttl = time.Second
+	sem := c.Semaphore("renewed", 1, Lease(ttl)) // autoRenew on
 
 	p, err := sem.Acquire(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	defer func() { _ = p.Release(context.Background()) }()
+	original := p.ExpiresAt()
 
 	// Hold well past the TTL; the heartbeat should keep the permit.
-	time.Sleep(600 * time.Millisecond)
-	_, err = sem.TryAcquire(context.Background(), 1)
+	time.Sleep(3 * ttl)
+	if !p.ExpiresAt().After(original) {
+		t.Fatal("heartbeat did not advance the confirmed expiry")
+	}
+	select {
+	case <-p.Lost():
+		t.Fatal("renewing permit lost ownership")
+	default:
+	}
+	other, err := sem.TryAcquire(context.Background(), 1)
+	if other != nil {
+		_ = other.Release(context.Background())
+	}
 	expectBusy(t, err)
 }

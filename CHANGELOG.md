@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Recover the same live acquisition after a lost reply and go-redis retry,
+  without misreporting contention, incrementing fencing again, or refreshing
+  server expiry. Covers mutex/leader, writer, reader and semaphore scripts.
+- Correct the CI coverage awk check (shell uses `$1`, not Makefile `$$1`),
+  and fail if no total was found.
+- Make the leaky-bucket test's client timestamp explicit, and observe actual
+  renewal past the original expiry with a scheduler-tolerant lease. Real and
+  in-memory contention fixtures now use the same short retry backoff; public
+  defaults, contention counts and exclusion assertions are unchanged.
+
+### Changed
+
+- Prometheus `New` aggregates resource labels as `other`; use
+  `NewWithResources` for an explicit fixed allowlist. This changes dashboard
+  series, not collector names/label keys or Metrics/Tracer interfaces.
+- Align README and semantics on clock assumptions, best-effort FIFO cleanup,
+  and fencing counter rollback/data loss. Feature scope is now maintenance.
+
+### Added
+
+- Self-owned loopback Docker fault regressions against real Redis/Valkey:
+  late/drop responses, retry, loss/release and kill/restart, including a
+  negative check demonstrating counter reset without persistence.
+- `scripts/check-real.sh` runs full ordinary/race integration suites and
+  removes only its own containers/temporary volumes.
+
 ## [0.7.0] - 2026-08-30
 
 ### Changed

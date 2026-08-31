@@ -29,13 +29,18 @@ gratitude.
 
 ```sh
 go test ./... -race -count=1                 # unit tests (miniredis-backed)
-DISTSYNC_TEST_REDIS_ADDR=localhost:6379 go test ./... -race -count=1   # full suite against a real Redis/Valkey server
+bash scripts/check-real.sh redis:7-alpine   # full ordinary/race + isolated faults
+bash scripts/check-real.sh valkey/valkey:8
 go vet ./...                   # static checks
 gofmt -l .                     # formatting (must be empty)
 golangci-lint run ./...        # lint (standard set)
 ```
 
 CI runs the full suite against real Redis 7 and Valkey 8 on every push.
+The isolated script needs Docker and only deletes its own temporary containers
+and volumes. Do not point `DISTSYNC_TEST_REDIS_ADDR` at existing data: the normal
+integration helper calls FLUSHDB. Fault tests never use that address to stop or
+restart a server; they always create their own instance.
 
 ## License
 

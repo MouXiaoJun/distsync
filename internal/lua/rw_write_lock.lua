@@ -32,6 +32,11 @@ local now = tonumber(ARGV[3])
 local waiterTimeout = tonumber(ARGV[4])
 local member = 'W:' .. token
 
+-- Recover a committed grant after reply loss, without rejoining the queue.
+if redis.call('GET', writer) == token then
+    return tonumber(redis.call('GET', fencing))
+end
+
 -- Join (first attempt) or refresh (retry) our place in the queue. The
 -- arrival sequence is sticky across retries: score = my position.
 local seq = redis.call('ZSCORE', waiters, member)

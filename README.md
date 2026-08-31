@@ -38,7 +38,7 @@ defer guard.Unlock(ctx)
 - [Semantics](#semantics)
 - [Compatibility](#compatibility)
 - [CI](#ci)
-- [Roadmap](#roadmap-v06)
+- [Maintenance scope](#maintenance-scope)
 
 ## Install
 
@@ -81,15 +81,17 @@ if err != nil {
 }
 defer guard.Unlock(ctx)
 
-// The fencing token is strictly increasing per resource. Persist it with
-// the side effect and reject stale writers:
+// Tokens increase per resource only if the Redis counter never rolls back.
+// Atomically persist the token with the side effect and reject stale writers:
 //   UPDATE orders SET status='paid', fencing_token=? WHERE id=10001 AND fencing_token < ?
 fmt.Println(guard.FencingToken())
 ```
 
-This solves the classic lock-expiry race: A holds the lock → A pauses (GC /
-network) → the lease expires → B acquires → A resumes → A and B both write.
-With fencing tokens, A's write is rejected because its token is older.
+For the lock-expiry race (A pauses, B acquires, A resumes), a participating
+destination rejects A's older token after recording B's newer token. This
+requires atomic enforcement at the destination and a counter that never
+rolls back. Restarting Redis/Valkey with lost data can reset that counter;
+fencing is **not** safe across arbitrary data loss. See [semantics](docs/semantics.md#2-fencing-tokens).
 
 Also available: `mu.TryLock(ctx)` (non-blocking, `ErrNotAcquired`),
 `mu.Unlock(ctx)` (convenience), `guard.Renew(ctx)`, `guard.Lost()`.
@@ -114,8 +116,9 @@ wg.Unlock(ctx)
 Contention is **strictly FIFO**: every contender joins a single
 arrival queue, and grants happen in arrival order — a reader never jumps a
 queued writer, and a writer never jumps anyone. A crashed contender is
-purged from the queue automatically, and a canceled waiter leaves it
-immediately, so the lock can never be blocked by a ghost.
+purged from the queue automatically; canceled waiters leave on a best-effort
+basis. A transport failure can leave an entry until purged; FIFO assumes
+contenders do not exceed the silence timeout.
 
 ### Semaphore
 
@@ -192,18 +195,19 @@ if err := leader.Run(ctx, func(ctx context.Context) error {
 }
 ```
 
-Only one replica runs the callback. If the leader dies or its lease
+Only the current lease holder should run leader work. If the leader dies or its lease
 expires, another replica takes over; the callback's context is canceled on
-loss so the old leader can shut down gracefully. `TryRun` gives a
+loss so the old leader can shut down gracefully; cancellation cannot force a
+paused or non-cooperating callback to stop. `TryRun` gives a
 non-blocking variant (`ErrNotAcquired` when someone else is leader).
 
 To fence the leader's own writes (reconciliation, settlement), enable
-fencing — tokens increase across every leadership change:
+fencing — tokens increase while the counter is preserved without rollback:
 
 ```go
 leader := client.Leader("settlement", distsync.Fencing())
 // inside the callback:
-fmt.Println(leader.FencingToken()) // strictly increasing per leadership
+fmt.Println(leader.FencingToken()) // enforce at the destination; see semantics
 ```
 
 ### Distributed single-flight
@@ -241,8 +245,8 @@ Semaphore ──► PermitSet
   fully exited.
 - **Safe on failure** — definitive ownership loss (renewal says "not
   yours") cancels the guard's `Context()`/`Lost()` and stops the heartbeat;
-  transient Redis errors are retried rather than silently dropping the
-  lease.
+  transient Redis errors are retried only within the last confirmed local
+  validity. An independent timer revokes local use even while I/O is blocked.
 
 ### Redis Cluster
 
@@ -261,6 +265,19 @@ which go-redis handles per node.
 ```go
 client := distsync.New(rdb, distsync.WithMetrics(metrics.New(nil)))
 ```
+
+Resource labels are bounded by default: `New` aggregates them as
+`resource="other"`. To retain a small, fixed set of non-sensitive names:
+
+```go
+sink := metrics.NewWithResources(nil, "scheduler", "settlement")
+```
+
+All other names (including dynamic order/user IDs) stay in `other`. With N
+allowed names each collector has at most N+1 resource values. Collector
+names/label keys and the `Metrics`/`Tracer` interfaces are unchanged; dashboards
+filtering raw resource IDs must migrate to aggregation or a fixed allowlist.
+Direct sink callers must also bound `primitive` and `reason` label values.
 
 `dist.Tracer` accepts an OpenTelemetry adapter; a ready-made one ships in
 `github.com/MouXiaoJun/distsync/telemetry`:
@@ -292,12 +309,20 @@ GitHub Actions runs on every push and pull request:
 - gofmt, `go vet`, `go test -race` on Go 1.21 and 1.25, plus golangci-lint;
 - an integration job that runs the **entire** test suite against real
   **Redis 7** and real **Valkey 8** servers (the same suite normally runs on
-  miniredis; set `DISTSYNC_TEST_REDIS_ADDR` to point it at any Redis-protocol
-  server, e.g. `make test-redis`).
+  miniredis). **These tests flush the selected database**; never set
+  `DISTSYNC_TEST_REDIS_ADDR` to a user/production server. Prefer
+  `bash scripts/check-real.sh redis:7-alpine` (or `valkey/valkey:8`), which
+  creates and removes its own loopback-only server;
+- isolated Docker fault cases (`DISTSYNC_FAULT_IMAGE`): late/lost replies,
+  process kill/restart, loss/release, preserved versus lost fencing counters.
+  They only stop containers they created, never an existing service. Finite
+  fault cases are regression evidence, not a proof for every distributed failure.
 
-## Roadmap (v0.6+)
+## Maintenance scope
 
-- Formal spec notes on fencing / lease-expiry semantics.
+The current primitives are feature-frozen: maintain correctness, compatibility,
+and reproducible regression checks. The [semantics](docs/semantics.md) remain
+conditional on backend durability, clocks and cooperating callers.
 
 Deliberately out of scope: distributed map/queue/delayed
 queue/topic/bloom filter/atomic counter/sets/lists/remote services. This

@@ -21,6 +21,9 @@ const testRedisAddrEnv = "DISTSYNC_TEST_REDIS_ADDR"
 // and returns a nil miniredis handle.
 func newTestClient(t *testing.T, opts ...ClientOption) (*Client, *miniredis.Miniredis) {
 	t.Helper()
+	// Use the same snappy backoff on both backends. Contention tests still run
+	// every acquisition/invariant, without spending minutes at the 2s ceiling.
+	opts = append([]ClientOption{WithRetry(5*time.Millisecond, 50*time.Millisecond)}, opts...)
 	if addr := os.Getenv(testRedisAddrEnv); addr != "" {
 		rdb := redis.NewClient(&redis.Options{Addr: addr})
 		t.Cleanup(func() { _ = rdb.Close() })
@@ -32,10 +35,6 @@ func newTestClient(t *testing.T, opts ...ClientOption) (*Client, *miniredis.Mini
 	s := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	// Snappier acquisition backoff than the library default (50ms..2s): the
-	// contention tests hammer the primitives, and a 5ms..50ms floor keeps
-	// them fast while still exercising real backoff paths.
-	opts = append([]ClientOption{WithRetry(5*time.Millisecond, 50*time.Millisecond)}, opts...)
 	return New(rdb, opts...), s
 }
 
